@@ -1,0 +1,5 @@
+# Python virtual environment
+venv/
+
+# GGUF model files
+models/*.gguf
