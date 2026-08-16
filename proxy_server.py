@@ -156,6 +156,49 @@ def get_vram_tier(vram_gb):
     else:
         return "8GB"
 
+def get_performance_settings(vram_tier):
+    """Select context and batch settings based on available VRAM."""
+    settings = {
+        "4GB": {
+            "n_ctx": 8192,
+            "n_batch": 128,
+        },
+        "6GB": {
+            "n_ctx": 12288,
+            "n_batch": 256,
+        },
+        "8GB": {
+            "n_ctx": 16384,
+            "n_batch": 256,
+        },
+    }
+
+    return settings.get(vram_tier, settings["4GB"])
+
+def get_adaptive_configs(vram_tier):
+    """Return performance configurations from fastest/largest to safest."""
+    configs = {
+        "4GB": [
+            {"n_ctx": 8192,  "n_batch": 128},
+            {"n_ctx": 4096,  "n_batch": 128},
+            {"n_ctx": 4096,  "n_batch": 64},
+        ],
+        "6GB": [
+            {"n_ctx": 12288, "n_batch": 256},
+            {"n_ctx": 8192,  "n_batch": 256},
+            {"n_ctx": 8192,  "n_batch": 128},
+            {"n_ctx": 4096,  "n_batch": 128},
+        ],
+        "8GB": [
+            {"n_ctx": 16384, "n_batch": 256},
+            {"n_ctx": 12288, "n_batch": 256},
+            {"n_ctx": 8192,  "n_batch": 256},
+            {"n_ctx": 8192,  "n_batch": 128},
+            {"n_ctx": 4096,  "n_batch": 128},
+        ],
+    }
+
+    return configs.get(vram_tier, configs["4GB"])
 
 def confirm_gpu_settings():
     """Runs auto-detection, prompts the user to confirm detection, or lets them manually override."""
@@ -242,6 +285,20 @@ def main():
     # 1. Detect and confirm GPU vendor & VRAM tier
     vendor, vram_tier = confirm_gpu_settings()
 
+    # 2. Automatically select performance settings
+    performance = get_performance_settings(vram_tier)
+    n_ctx = performance["n_ctx"]
+    n_batch = performance["n_batch"]
+
+    print("\n" + "-" * 65)
+    print("                PERFORMANCE SETTINGS")
+    print("-" * 65)
+    print(f"  • VRAM Tier     : {vram_tier}")
+    print(f"  • Context       : {n_ctx:,} tokens")
+    print(f"  • Batch Size    : {n_batch}")
+    print("-" * 65 + "\n")
+
+    # 3. Find / download model
     existing_models = get_existing_models()
     model_path = None
 
@@ -271,25 +328,90 @@ def main():
         else:
             model_path = existing_models[0]
 
-    # 2. Launch llama-cpp-python API server
+        # 2. Launch llama-cpp-python API server
     from llama_cpp.server.app import create_app
     from llama_cpp.server.settings import ModelSettings, ServerSettings
     import uvicorn
 
     print(f"\nStarting API Server with model: {os.path.basename(model_path)}")
 
-    model_settings = ModelSettings(
-        model=model_path,
-        n_gpu_layers=-1,  # 100% offload to GPU
-        n_ctx=4096,
-        n_batch=512,
-        verbose=True
+    server_settings = ServerSettings(
+        host="127.0.0.1",
+        port=8000
     )
 
-    server_settings = ServerSettings(host="127.0.0.1", port=8000)
+    # Adaptive VRAM configuration
+    configs = get_adaptive_configs(vram_tier)
 
-    app = create_app(server_settings=server_settings, model_settings=[model_settings])
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    app = None
+    selected_config = None
+
+    print("\n" + "=" * 65)
+    print("             ADAPTIVE PERFORMANCE SETUP")
+    print("=" * 65)
+    print(f"  VRAM Tier: {vram_tier}")
+    print(f"  Configurations to test: {len(configs)}")
+    print("=" * 65)
+
+    for index, config in enumerate(configs, start=1):
+        n_ctx = config["n_ctx"]
+        n_batch = config["n_batch"]
+
+        print(
+            f"\n[{index}/{len(configs)}] "
+            f"Trying context={n_ctx:,}, batch={n_batch}..."
+        )
+
+        try:
+            model_settings = ModelSettings(
+                model=model_path,
+                n_gpu_layers=-1,
+                n_ctx=n_ctx,
+                n_batch=n_batch,
+                verbose=True
+            )
+
+            app = create_app(
+                server_settings=server_settings,
+                model_settings=[model_settings]
+            )
+
+            selected_config = config
+
+            print("\n" + "=" * 65)
+            print("             CONFIGURATION SUCCESSFUL")
+            print("=" * 65)
+            print(f"  Context    : {n_ctx:,} tokens")
+            print(f"  Batch Size : {n_batch}")
+            print(f"  GPU Layers : All")
+            print("=" * 65)
+
+            break
+
+        except Exception as error:
+            print(
+                f"  Configuration failed: "
+                f"{type(error).__name__}: {error}"
+            )
+            print("  Trying a safer configuration...")
+
+            app = None
+
+    if app is None:
+        print("\n" + "=" * 65)
+        print("             MODEL INITIALIZATION FAILED")
+        print("=" * 65)
+        print("Unable to initialize the model with any")
+        print("of the available VRAM configurations.")
+        print("=" * 65)
+        sys.exit(1)
+
+    print("\nStarting API server at http://127.0.0.1:8000")
+    uvicorn.run(
+        app,
+        host="127.0.0.1",
+        port=8000
+    )
 
 
 if __name__ == "__main__":

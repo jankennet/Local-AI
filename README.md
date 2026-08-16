@@ -1,426 +1,195 @@
 # LocalAI — Local LLM Server
 
-> A lightweight local AI server for running quantized GGUF models with `llama.cpp` and Vulkan GPU acceleration.
+> Lightweight local LLM server for GGUF models using `llama.cpp`, with **CUDA on NVIDIA** and **Vulkan on AMD/Intel**.
 
-LocalAI provides an **OpenAI-compatible API** for running local LLMs on consumer hardware. It automatically detects the available GPU, maps its VRAM to an appropriate model tier, and provides an interactive model selection and download workflow.
-
-The server is designed primarily for **local development, coding assistants, and VS Code AI extensions** such as Continue, Roo Code, and Cline.
-
----
+Designed for local development, coding assistants, and VS Code tools such as **Continue, Roo Code, and Cline**.
 
 ## Features
 
-- **OpenAI-compatible API** powered by `llama-cpp-python`
-- **Vulkan GPU acceleration** for supported GPUs
-- **Automatic GPU detection**
-  - NVIDIA via `nvidia-smi`
-  - AMD via Windows PowerShell or Linux utilities
-  - CPU / integrated graphics fallback
-- **Automatic VRAM tier detection**
-  - 4GB
-  - 6GB
-  - 8GB
-- **Interactive model selection**
-- **Automatic GGUF model downloads** from Hugging Face
-- **Full GPU layer offloading** using `n_gpu_layers=-1`
-- **Local-only server** bound to `127.0.0.1:8000`
-- Works with applications that support OpenAI-compatible endpoints
+- OpenAI-compatible API
+- Automatic GPU + VRAM detection
+- CUDA / Vulkan backend selection
+- Interactive GGUF model download
+- Full GPU offloading
+- Adaptive `n_ctx` / `n_batch`
+- Automatic fallback to safer configurations
+- Local-only server at `127.0.0.1:8000`
 
 ---
 
-## How It Works
+## Quick Start
 
-The launcher follows this flow:
-
-```text
-Start LocalAI
-     │
-     ▼
-Detect GPU + VRAM
-     │
-     ▼
-Map VRAM to model tier
-     │
-     ├── 4GB
-     ├── 6GB
-     └── 8GB
-     │
-     ▼
-Check models/
-     │
-     ├── Existing GGUF
-     │       └── Run / Download New
-     │
-     └── No GGUF
-             └── Select & Download Model
-                     │
-                     ▼
-              Hugging Face
-                     │
-                     ▼
-              llama-cpp-python
-                     │
-                     ▼
-          OpenAI-compatible API
-             127.0.0.1:8000
-```
-
----
-
-# Requirements
-
-## Hardware
-
-The model catalog is organized around GPU VRAM capacity.
-
-| VRAM | Target Tier | Typical Use |
-|---:|---|---|
-| ≤ 5GB | 4GB | Lightweight 3B models |
-| 6–7GB | 6GB | 7B Q3 models |
-| ≥ 8GB | 8GB | 7B Q4 / 8B Q4 models |
-
-The VRAM tier is used to determine which models are presented in the interactive selector.
-
-> **Note:** The detected VRAM is only used for model selection. Actual model compatibility also depends on available system RAM, GPU driver support, context size, and model quantization.
-
----
-
-# Software Prerequisites
-
-Before installing `llama-cpp-python`, install the required C/C++ build tools and Vulkan development packages.
-
-## Arch Linux / CachyOS / Manjaro
-
-```bash
-sudo pacman -S --needed \
-  cmake \
-  gcc \
-  vulkan-devel \
-  spirv-headers \
-  spirv-tools \
-  shaderc \
-  vulkan-icd-loader
-```
-
-## Ubuntu / Debian
-
-```bash
-sudo apt update
-
-sudo apt install \
-  build-essential \
-  cmake \
-  libvulkan-dev \
-  glslc \
-  spirv-headers \
-  spirv-tools \
-  vulkan-tools
-```
-
-## Fedora
-
-```bash
-sudo dnf install \
-  cmake \
-  gcc-c++ \
-  vulkan-devel \
-  spirv-headers \
-  spirv-tools \
-  shaderc
-```
-
-You also need a working Vulkan driver for your GPU.
-
----
-
-# Project Structure
-
-The expected project structure is:
-
-```text
-LocalAI/
-├── models/             # Downloaded .gguf models
-├── setup.sh            # Linux setup script
-├── start.sh            # Linux launcher
-├── setup.bat           # Windows setup script
-├── start.bat           # Windows launcher
-└── proxy_server.py     # LocalAI launcher
-```
-
-The Python launcher creates the `models/` directory automatically if it does not exist.
-
----
-
-# Installation
-
-## Linux / CachyOS
-
-Make the scripts executable:
+### Linux
 
 ```bash
 chmod +x setup.sh start.sh
-```
-
-Run the setup:
-
-```bash
 ./setup.sh
-```
-
-## Windows
-
-Run:
-
-```cmd
-setup.bat
-```
-
----
-
-# Vulkan Build
-
-Vulkan support must be enabled when `llama-cpp-python` is compiled.
-
-The important build option is:
-
-```bash
--DGGML_VULKAN=1
-```
-
-For older CPUs, limit the number of parallel compilation jobs to avoid excessive RAM usage:
-
-```bash
-export CMAKE_BUILD_PARALLEL_LEVEL=2
-export CMAKE_ARGS="-DGGML_VULKAN=1"
-
-pip install llama-cpp-python --no-cache-dir --force-reinstall
-```
-
-### Why limit compilation threads?
-
-Compiling `llama-cpp-python` can consume significant CPU and memory bandwidth. On older quad-core systems, unrestricted parallel compilation can cause heavy system thrashing or make the machine temporarily unresponsive.
-
-Two parallel build jobs are a safer starting point for older hardware.
-
----
-
-# Model Selection
-
-When the server starts, it detects the GPU and determines its VRAM tier.
-
-For example:
-
-```text
-=============================================================
-                 GPU & VRAM DETECTED
-=============================================================
-  • Vendor        : AMD
-  • Model         : AMD Radeon RX ...
-  • VRAM Detected : ~8 GB (Target Tier: 8GB)
-=============================================================
-```
-
-The detected hardware can be confirmed or manually overridden.
-
-If the detected configuration is incorrect, the launcher allows you to select:
-
-```text
-NVIDIA
-AMD
-Intel / Integrated / CPU
-```
-
-and manually choose:
-
-```text
-4GB
-6GB
-8GB
-```
-
----
-
-# Included Models
-
-## 4GB Tier
-
-### Qwen 2.5 3B Instruct
-
-```text
-Qwen/Qwen2.5-3B-Instruct-GGUF
-qwen2.5-3b-instruct-q4_k_m.gguf
-~2.0 GB
-```
-
-Best general-purpose lightweight option.
-
-### Llama 3.2 3B Instruct
-
-```text
-bartowski/Llama-3.2-3B-Instruct-GGUF
-Llama-3.2-3B-Instruct-Q4_K_M.gguf
-~2.0 GB
-```
-
-Lightweight Meta model.
-
-### Phi-3.5 Mini 3.8B
-
-```text
-bartowski/Phi-3.5-mini-instruct-GGUF
-Phi-3.5-mini-instruct-Q4_K_M.gguf
-~2.3 GB
-```
-
-Lightweight model focused on reasoning and general tasks.
-
----
-
-## 6GB Tier
-
-### Qwen 2.5 Coder 7B — Q3_K_M
-
-```text
-Qwen/Qwen2.5-Coder-7B-Instruct-GGUF
-qwen2.5-coder-7b-instruct-q3_k_m.gguf
-~3.8 GB
-```
-
-Recommended for coding.
-
-### Qwen 2.5 7B — Q3_K_M
-
-```text
-Qwen/Qwen2.5-7B-Instruct-GGUF
-qwen2.5-7b-instruct-q3_k_m.gguf
-~3.8 GB
-```
-
-General chat and reasoning.
-
-### Llama 3.2 3B — Q8_0
-
-```text
-bartowski/Llama-3.2-3B-Instruct-GGUF
-Llama-3.2-3B-Instruct-Q8_0.gguf
-~3.4 GB
-```
-
-Higher-quality 3B quantization.
-
----
-
-## 8GB Tier
-
-### Llama 3.1 8B — Q4_K_M
-
-```text
-bartowski/Meta-Llama-3.1-8B-Instruct-GGUF
-Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf
-~4.9 GB
-```
-
-General-purpose 8B model.
-
-### Qwen 2.5 Coder 7B — Q4_K_M
-
-```text
-Qwen/Qwen2.5-Coder-7B-Instruct-GGUF
-qwen2.5-coder-7b-instruct-q4_k_m.gguf
-~4.7 GB
-```
-
-**Recommended for coding and VS Code.**
-
-### Qwen 2.5 7B — Q4_K_M
-
-```text
-Qwen/Qwen2.5-7B-Instruct-GGUF
-qwen2.5-7b-instruct-q4_k_m.gguf
-~4.7 GB
-```
-
-General chat and mathematics.
-
----
-
-# Running LocalAI
-
-Start the launcher:
-
-```bash
 ./start.sh
 ```
 
-The launcher will:
+### Windows
 
-1. Detect the GPU.
-2. Detect available VRAM.
-3. Determine the appropriate model tier.
-4. Ask you to confirm the hardware.
-5. Check the `models/` directory.
-6. Download a model if necessary.
-7. Start the local API server.
+```cmd
+setup.bat
+start.bat
+```
 
-You can also launch the Python file directly:
+The launcher automatically:
 
-```bash
-./venv/bin/python proxy_server.py
+```text
+Detect GPU
+   ↓
+Detect VRAM
+   ↓
+Select model tier
+   ↓
+Download / select GGUF
+   ↓
+Find a working runtime configuration
+   ↓
+Start API server
 ```
 
 ---
 
-# Server Configuration
-
-The server currently runs on:
-
-```text
-Host: 127.0.0.1
-Port: 8000
-```
-
-API base:
+## API
 
 ```text
 http://127.0.0.1:8000/v1
 ```
 
-The launcher configures the model with:
-
-```text
-GPU layers: all
-Context size: 4096
-Batch size: 512
-```
-
-`n_gpu_layers=-1` requests full GPU layer offloading.
-
----
-
-# OpenAI-Compatible API
-
-The server is provided by `llama-cpp-python`'s built-in server.
-
-Typical endpoints include:
+Common endpoints:
 
 ```text
 GET  /v1/models
 POST /v1/chat/completions
 ```
 
-This means applications that support OpenAI-compatible APIs can connect to LocalAI without requiring a separate custom API implementation.
+Works with applications supporting OpenAI-compatible APIs.
 
 ---
 
-# VS Code Integration
+## Recommended Models
 
-LocalAI can be used as a local inference backend for coding assistants.
+| VRAM | Recommended Model | Quantization |
+|---:|---|---|
+| ≤ 5GB | Qwen 2.5 3B Instruct | Q4_K_M |
+| 6–7GB | Qwen 2.5 Coder 7B | Q3_K_M |
+| ≥ 8GB | Qwen 2.5 Coder 7B | Q4_K_M |
 
-## Continue
+The launcher provides additional models for each tier.
 
-Install the **Continue** VS Code extension and configure it to use the local OpenAI-compatible endpoint.
+<details>
+<summary><strong>View full model catalog</strong></summary>
 
-Example:
+### 4GB
+
+- **Qwen 2.5 3B Instruct** — Q4_K_M (~2.0 GB)
+- **Llama 3.2 3B Instruct** — Q4_K_M (~2.0 GB)
+- **Phi-3.5 Mini 3.8B** — Q4_K_M (~2.3 GB)
+
+### 6GB
+
+- **Qwen 2.5 Coder 7B** — Q3_K_M (~3.8 GB)
+- **Qwen 2.5 7B** — Q3_K_M (~3.8 GB)
+- **Llama 3.2 3B** — Q8_0 (~3.4 GB)
+
+### 8GB
+
+- **Llama 3.1 8B** — Q4_K_M (~4.9 GB)
+- **Qwen 2.5 Coder 7B** — Q4_K_M (~4.7 GB)
+- **Qwen 2.5 7B** — Q4_K_M (~4.7 GB)
+
+</details>
+
+---
+
+## Adaptive Runtime
+
+LocalAI automatically tries progressively safer configurations based on detected VRAM.
+
+| Tier | Configurations |
+|---|---|
+| 4GB | `8K/128 → 4K/128 → 4K/64` |
+| 6GB | `12K/256 → 8K/256 → 8K/128 → 4K/128` |
+| 8GB | `16K/256 → 12K/256 → 8K/256 → 8K/128 → 4K/128` |
+
+Format:
+
+```text
+n_ctx / n_batch
+```
+
+If a configuration cannot initialize, the next safer configuration is attempted automatically.
+
+> `n_ctx` controls context/KV-cache capacity. `n_batch` primarily affects prompt-processing memory and performance.
+
+---
+
+## GPU Backends
+
+| GPU | Backend |
+|---|---|
+| NVIDIA | CUDA |
+| AMD | Vulkan |
+| Intel | Vulkan |
+| CPU fallback | CPU |
+
+The setup scripts automatically select the backend.
+
+<details>
+<summary><strong>Linux prerequisites</strong></summary>
+
+### Arch / CachyOS
+
+```bash
+sudo pacman -S --needed \
+  cmake gcc vulkan-devel \
+  spirv-headers spirv-tools \
+  shaderc vulkan-icd-loader
+```
+
+### Ubuntu / Debian
+
+```bash
+sudo apt install \
+  build-essential cmake \
+  libvulkan-dev glslc \
+  spirv-headers spirv-tools \
+  vulkan-tools
+```
+
+A working GPU driver/Vulkan installation is also required.
+
+</details>
+
+<details>
+<summary><strong>Windows prerequisites</strong></summary>
+
+Install:
+
+- Python 3
+- CMake
+- Visual Studio Build Tools with C++
+- Git
+- GPU drivers
+- CUDA development tools for NVIDIA
+- Vulkan runtime/development tools for AMD/Intel
+
+</details>
+
+---
+
+## Integrating with VS Code
+
+You can connect this local server to VS Code using either the **Continue extension** or **VS Code Native / GitHub Copilot (BYOK)**.
+
+### Option A: Continue Extension (Recommended)
+`Continue` provides dedicated support for local models, offline chat, and instant inline tab autocomplete. 
+
+1. Install **Continue** from the VS Code Marketplace.
+2. Open the Continue sidebar, click the ⚙️ **Settings icon** (bottom right), and open `~/.continue/config.yaml`.
+3. Paste the following configuration to enable the model for Chat, Edits, and Autocomplete:
 
 ```yaml
 name: Main Config
@@ -430,183 +199,114 @@ schema: v1
 models:
   - name: Local Qwen 2.5 Coder
     provider: openai
-    model: qwen2.5-coder-7b-instruct-q4_k_m
-    apiBase: http://127.0.0.1:8000/v1
+    model: Qwen2.5-Coder-7B-Instruct-Q4_K_M
+    apiBase: [http://127.0.0.1:8000/v1](http://127.0.0.1:8000/v1)
     roles:
       - chat
       - edit
       - autocomplete
 ```
 
-> Use the actual model identifier exposed by `/v1/models` if your Continue configuration requires an exact model name.
+### Option B: VS Code Native / GitHub Copilot (BYOK)
+VS Code allows connecting custom OpenAI-compatible endpoints directly through its native Chat interface via **Bring Your Own Key (BYOK)**.
 
-Other OpenAI-compatible VS Code clients can use the same API base:
+1. Press `Ctrl+Shift+P` (`Cmd+Shift+P` on Mac) to open the Command Palette.
+2. Run: **`Chat: Manage Language Models`**.
+3. Click **Add Models** $\rightarrow$ select **Custom Endpoint** (or **OpenAI**).
+4. Fill in the details when prompted:
+   - **Group / Provider Name**: `LocalAI`
+   - **API Base URL**: `http://127.0.0.1:8000/v1`
+   - **API Key**: Type `none` or `not-needed`
+5. Select `LocalAI` from the model dropdown in your VS Code Chat panel.
+
+Use the model ID returned by:
 
 ```text
-http://127.0.0.1:8000/v1
+GET /v1/models
 ```
+
+if the client requires an exact identifier.
 
 ---
 
-# Troubleshooting
-
-## `Could not find SPIRV-HeadersConfig.cmake`
-
-The Vulkan build dependencies are missing.
-
-Install:
+<details>
+<summary><strong>Project Structure</strong></summary>
 
 ```text
-spirv-headers
-spirv-tools
-shaderc
+LocalAI/
+├── models/
+├── setup.sh
+├── start.sh
+├── setup.bat
+├── start.bat
+├── proxy_server.py
+└── requirements.txt
 ```
 
-Then reinstall `llama-cpp-python`:
+`models/` is created automatically.
 
-```bash
-pip install llama-cpp-python --no-cache-dir --force-reinstall
-```
+</details>
 
----
+<details>
+<summary><strong>Troubleshooting</strong></summary>
 
-## Compilation Uses Too Much RAM
+### Vulkan build fails
 
-Reduce the number of build jobs:
+Make sure the Vulkan development packages, SPIR-V headers, and shader compiler are installed.
+
+### Build uses too much RAM
+
+Limit compilation parallelism:
 
 ```bash
 export CMAKE_BUILD_PARALLEL_LEVEL=2
 ```
 
-Then rebuild:
+Windows:
 
-```bash
-pip install llama-cpp-python --no-cache-dir --force-reinstall
+```cmd
+set CMAKE_BUILD_PARALLEL_LEVEL=2
 ```
+
+### GPU is not detected
+
+The launcher supports manual GPU/VRAM override.
+
+### Model initialization fails
+
+The launcher automatically tries smaller context/batch configurations. If all configurations fail, check available VRAM, system RAM, drivers, and backend installation.
+
+</details>
 
 ---
 
-## Vulkan GPU Is Not Being Used
-
-First verify that your GPU has a working Vulkan installation.
-
-Then verify that `llama-cpp-python` was compiled with:
-
-```bash
--DGGML_VULKAN=1
-```
-
-The Python launcher itself does not compile or enable Vulkan; it relies on the installed `llama-cpp-python` build.
-
----
-
-## Wrong GPU or VRAM Detected
-
-The launcher provides a manual override during startup.
-
-Select:
+## Architecture
 
 ```text
-NVIDIA
-AMD
-Intel / Integrated / CPU
+VS Code / Client
+       │
+       ▼
+ LocalAI Launcher
+       │
+ ┌─────┴─────┐
+ ▼           ▼
+GPU/VRAM    Model
+Detection   Selection
+ └─────┬─────┘
+       ▼
+   GGUF Model
+       │
+       ▼
+llama-cpp-python
+   CUDA/Vulkan
+       │
+       ▼
+Adaptive Runtime
+       │
+       ▼
+OpenAI API :8000/v1
 ```
 
-and then choose the appropriate:
+## License
 
-```text
-4GB
-6GB
-8GB
-```
-
-tier.
-
----
-
-## No Models Found
-
-The launcher automatically creates:
-
-```text
-models/
-```
-
-If no `.gguf` model exists, it opens the model selector and downloads the selected model from Hugging Face.
-
-You can also manually place compatible `.gguf` files inside:
-
-```text
-models/
-```
-
----
-
-# Recommended Configuration for Older Hardware
-
-For systems with older CPUs and limited RAM, start with:
-
-```text
-CMAKE_BUILD_PARALLEL_LEVEL=2
-```
-
-and use a model appropriate for the GPU's VRAM tier.
-
-For an 8GB GPU, the recommended coding model is:
-
-```text
-Qwen 2.5 Coder 7B — Q4_K_M
-```
-
-For lower-VRAM systems, use the 3B models in the 4GB tier.
-
----
-
-# Architecture
-
-```text
-                 ┌─────────────────────┐
-                 │      VS Code        │
-                 │ Continue / Roo /    │
-                 │       Cline         │
-                 └──────────┬──────────┘
-                            │
-                            │ OpenAI API
-                            ▼
-                 ┌─────────────────────┐
-                 │      LocalAI        │
-                 │   Python Launcher   │
-                 └──────────┬──────────┘
-                            │
-                ┌───────────┴───────────┐
-                │                       │
-                ▼                       ▼
-        GPU / VRAM Detection      Model Selection
-                │                       │
-                └───────────┬───────────┘
-                            ▼
-                 ┌─────────────────────┐
-                 │   GGUF Model        │
-                 │      models/        │
-                 └──────────┬──────────┘
-                            │
-                            ▼
-                 ┌─────────────────────┐
-                 │  llama-cpp-python   │
-                 │ Vulkan GPU Backend   │
-                 └──────────┬──────────┘
-                            │
-                            ▼
-                 ┌─────────────────────┐
-                 │ OpenAI-Compatible   │
-                 │ API :8000/v1        │
-                 └─────────────────────┘
-```
-
----
-
-# License
-
-Add the project's license information here.
-
-Individual models downloaded from Hugging Face are subject to their respective model licenses.
+Model licenses are determined by their respective Hugging Face repositories.
