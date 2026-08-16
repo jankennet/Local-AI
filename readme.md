@@ -100,17 +100,21 @@ setup.bat
 
 ## How to Run the Server
 
-1. Place your GGUF model files inside the `models/` directory:
-   ```bash
-   # Example download (Qwen 2.5 Coder 7B GGUF)
-   wget -P models/ [https://huggingface.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF/resolve/main/qwen2.5-coder-7b-instruct-q4_k_m.gguf](https://huggingface.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF/resolve/main/qwen2.5-coder-7b-instruct-q4_k_m.gguf)
-   ```
-2. Start the server:
+1. Start the server:
    ```bash
    ./start.sh
    ```
-3. Select your model from the interactive CLI menu.
-4. The server will successfully launch at `http://127.0.0.1:8000`.
+   or run directly:
+   ```bash
+   ./venv/bin/python proxy_server.py
+   ```
+2. Select or Download Model:
+    - If no .gguf file exists in models/, the terminal will display an interactive menu powered by questionary.
+    - Use Up / Down Arrow keys and Enter to choose a model (Qwen 2.5 Coder 7B, Llama 3.1 8B, Phi-3.5 Mini, etc.).
+    - The script automatically downloads the model from Hugging Face and saves it to models/.
+
+3. The server will successfully launch at `http://127.0.0.1:8000`.
+4. Connect to VS Code:
 
 ---
 
