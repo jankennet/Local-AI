@@ -2,7 +2,7 @@
 setlocal EnableExtensions
 
 echo =======================================================
-echo          LocalAI Proxy Server Setup
+echo          LocalAI Server Setup
 echo =======================================================
 echo.
 
@@ -80,9 +80,14 @@ echo =======================================================
 echo Setup complete!
 echo =======================================================
 echo.
-echo Start the proxy with:
+echo Before starting, set an API key ^(required — the server is
+echo reachable from your whole network^):
 echo.
-echo     venv\Scripts\python.exe proxy_server.py
+echo     set LLM_API_KEY=your-generated-key-here
+echo.
+echo Then start the server with:
+echo.
+echo     start.bat
 echo.
 echo =======================================================
 

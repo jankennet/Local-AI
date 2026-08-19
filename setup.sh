@@ -2,7 +2,7 @@
 set -e
 
 echo "======================================================="
-echo "        LocalAI Proxy Server Setup"
+echo "        LocalAI Server Setup"
 echo "======================================================="
 
 echo ""
@@ -14,7 +14,8 @@ echo ""
 echo "[2/4] Installing base dependencies..."
 pip install --upgrade pip setuptools wheel
 
-# Install everything except llama-cpp-python.
+# Install everything except llama-cpp-python (built separately below,
+# with hardware-specific flags).
 grep -v "^llama-cpp-python" requirements.txt > /tmp/requirements-base.txt
 pip install -r /tmp/requirements-base.txt
 
@@ -64,6 +65,12 @@ echo "======================================================="
 echo " Setup complete!"
 echo "======================================================="
 echo ""
-echo "Start the proxy with:"
-echo "  ./venv/bin/python proxy_server.py"
+echo "Before starting, set an API key (required — the server is"
+echo "reachable from your whole network):"
+echo ""
+echo "  export LLM_API_KEY=\"\$(python -c 'import secrets; print(secrets.token_urlsafe(32))')\""
+echo "  echo \$LLM_API_KEY   # save this — every client needs it"
+echo ""
+echo "Then start the server with:"
+echo "  ./start.sh"
 echo ""
