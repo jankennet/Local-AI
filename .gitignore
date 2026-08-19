@@ -3,3 +3,7 @@ venv/
 
 # GGUF model files
 models/*.gguf
+
+# Ignore Python cache files
+__pycache__/
+*.pyc
