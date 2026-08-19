@@ -5,4 +5,6 @@ pydantic-settings
 sse-starlette
 starlette-context
 huggingface_hub
-questionary
+requests
+# llama-cpp-python is installed separately via setup.sh/setup.bat with
+# hardware-specific build flags (e.g. Vulkan for AMD) — not pinned here.

@@ -1,19 +1,21 @@
 # LocalAI — Local LLM Server
 
-> Lightweight local LLM server for GGUF models using `llama.cpp`, with **CUDA on NVIDIA** and **Vulkan on AMD/Intel**.
+> Self-hosted LLM server for GGUF models using `llama.cpp`, with **CUDA on NVIDIA** and **Vulkan on AMD/Intel**. Reachable from every device on your network — laptop, phone, another machine — each with its own persistent conversation.
 
-Designed for local development, coding assistants, and VS Code tools such as **Continue, Roo Code, and Cline**.
+Designed for local development, coding assistants (VS Code's **Continue**, **Roo Code**, **Cline**), and general chat from any device on your LAN.
 
 ## Features
 
-- OpenAI-compatible API
-- Automatic GPU + VRAM detection
-- CUDA / Vulkan backend selection
+- OpenAI-compatible API (`/v1/chat/completions`, `/v1/models`, ...)
+- Per-device session memory — each client gets its own conversation, tracked server-side
+- Automatic token-budget management: sessions are summarized/trimmed before they overflow the model's context window, instead of erroring out
+- Sessions auto-expire after a configurable TTL (default 30 days)
+- API-key authentication on every route, including the raw OpenAI-compatible ones
+- Automatic GPU + VRAM detection, CUDA/Vulkan backend selection
 - Interactive GGUF model download
 - Full GPU offloading
-- Adaptive `n_ctx` / `n_batch`
-- Automatic fallback to safer configurations
-- Local-only server at `127.0.0.1:8000`
+- Adaptive `n_ctx` / `n_batch` with automatic fallback to safer configurations
+- Bound to `0.0.0.0` — accessible from any device on your network, not just localhost
 
 ---
 
@@ -24,6 +26,8 @@ Designed for local development, coding assistants, and VS Code tools such as **C
 ```bash
 chmod +x setup.sh start.sh
 ./setup.sh
+export LLM_API_KEY="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+echo "Save this — every client needs it: $LLM_API_KEY"
 ./start.sh
 ```
 
@@ -31,6 +35,7 @@ chmod +x setup.sh start.sh
 
 ```cmd
 setup.bat
+set LLM_API_KEY=your-generated-key-here
 start.bat
 ```
 
@@ -43,29 +48,50 @@ Detect VRAM
    ↓
 Select model tier
    ↓
-Download / select GGUF
+Find or download a GGUF in models/
    ↓
-Find a working runtime configuration
+Find a working n_ctx/n_batch configuration
    ↓
-Start API server
+Start OpenAI-compatible API + session endpoints, on 0.0.0.0:8000
+   ↓
+Start background sweep for expired sessions
 ```
+
+Drop your `.gguf` file in `models/` at the project root before starting (see [Project Structure](#project-structure)) — if none is present, the launcher downloads the top recommendation for your detected VRAM tier automatically.
 
 ---
 
 ## API
 
 ```text
-http://127.0.0.1:8000/v1
+http://<server-lan-ip>:8000/v1
 ```
 
-Common endpoints:
+Every request — including the raw OpenAI-compatible ones — requires:
+
+```text
+X-API-Key: <your LLM_API_KEY>
+```
+
+### Raw completions (no memory)
 
 ```text
 GET  /v1/models
 POST /v1/chat/completions
 ```
 
-Works with applications supporting OpenAI-compatible APIs.
+Works with any OpenAI-compatible client. The client is responsible for sending its own conversation history each time — nothing is remembered server-side on this path. Useful for tools (like Continue) that already manage their own context.
+
+### Managed sessions (per-device memory)
+
+```text
+POST   /sessions                     -> {"session_id": "..."}
+GET    /sessions                     -> list of active sessions
+DELETE /sessions/{session_id}
+POST   /sessions/{session_id}/chat   -> {"message": "..."} -> {"reply": "..."}
+```
+
+Call `POST /sessions` once per device, store the returned `session_id` (see [`docs/CLIENT_SECURITY.md`](docs/CLIENT_SECURITY.md) for how — never in browser storage), then reuse it for every subsequent `POST /sessions/{id}/chat`. The server tracks token usage per session and automatically summarizes/trims older turns before the model's context window would overflow. Sessions untouched for `LLM_SESSION_TTL_DAYS` (default 30) are swept automatically.
 
 ---
 
@@ -114,13 +140,7 @@ LocalAI automatically tries progressively safer configurations based on detected
 | 6GB | `12K/256 → 8K/256 → 8K/128 → 4K/128` |
 | 8GB | `16K/256 → 12K/256 → 8K/256 → 8K/128 → 4K/128` |
 
-Format:
-
-```text
-n_ctx / n_batch
-```
-
-If a configuration cannot initialize, the next safer configuration is attempted automatically.
+Format: `n_ctx / n_batch`. If a configuration fails to initialize, the next safer one is tried automatically. Whichever `n_ctx` actually loads becomes the token budget the session manager enforces per device.
 
 > `n_ctx` controls context/KV-cache capacity. `n_batch` primarily affects prompt-processing memory and performance.
 
@@ -135,7 +155,7 @@ If a configuration cannot initialize, the next safer configuration is attempted 
 | Intel | Vulkan |
 | CPU fallback | CPU |
 
-The setup scripts automatically select the backend.
+`setup.sh` / `setup.bat` detect the backend and build `llama-cpp-python` accordingly.
 
 <details>
 <summary><strong>Linux prerequisites</strong></summary>
@@ -182,14 +202,13 @@ Install:
 
 ## Integrating with VS Code
 
-You can connect this local server to VS Code using either the **Continue extension** or **VS Code Native / GitHub Copilot (BYOK)**.
-
 ### Option A: Continue Extension (Recommended)
-`Continue` provides dedicated support for local models, offline chat, and instant inline tab autocomplete. 
+
+Continue manages its own conversation history client-side, so it talks to the raw `/v1/chat/completions` endpoint, not `/sessions`.
 
 1. Install **Continue** from the VS Code Marketplace.
-2. Open the Continue sidebar, click the ⚙️ **Settings icon** (bottom right), and open `~/.continue/config.yaml`.
-3. Paste the following configuration to enable the model for Chat, Edits, and Autocomplete:
+2. Open the Continue sidebar → ⚙️ **Settings** → `~/.continue/config.yaml`.
+3. Paste:
 
 ```yaml
 name: Main Config
@@ -200,52 +219,93 @@ models:
   - name: Local Qwen 2.5 Coder
     provider: openai
     model: Qwen2.5-Coder-7B-Instruct-Q4_K_M
-    apiBase: [http://127.0.0.1:8000/v1](http://127.0.0.1:8000/v1)
+    apiBase: http://<server-lan-ip>:8000/v1
+    apiKey: dummy
+    requestOptions:
+      headers:
+        X-API-Key: "<your LLM_API_KEY value>"
+    defaultCompletionOptions:
+      contextLength: 15000   # a bit under your actual n_ctx — leaves room for the reply
+      maxTokens: 1024
     roles:
       - chat
       - edit
       - autocomplete
 ```
 
+- `<server-lan-ip>` — the server machine's LAN IP if connecting from another device, or `127.0.0.1` if VS Code is on the same machine.
+- `X-API-Key` is required now — without it every request gets a 401, including from Continue.
+- `contextLength` should sit below whichever `n_ctx` your adaptive runtime actually landed on (check the server's startup log), not equal to it.
+
 ### Option B: VS Code Native / GitHub Copilot (BYOK)
-VS Code allows connecting custom OpenAI-compatible endpoints directly through its native Chat interface via **Bring Your Own Key (BYOK)**.
 
-1. Press `Ctrl+Shift+P` (`Cmd+Shift+P` on Mac) to open the Command Palette.
-2. Run: **`Chat: Manage Language Models`**.
-3. Click **Add Models** $\rightarrow$ select **Custom Endpoint** (or **OpenAI**).
-4. Fill in the details when prompted:
+1. `Ctrl+Shift+P` (`Cmd+Shift+P` on Mac) → **`Chat: Manage Language Models`**.
+2. **Add Models** → **Custom Endpoint** (or **OpenAI**).
+3. Fill in:
    - **Group / Provider Name**: `LocalAI`
-   - **API Base URL**: `http://127.0.0.1:8000/v1`
-   - **API Key**: Type `none` or `not-needed`
-5. Select `LocalAI` from the model dropdown in your VS Code Chat panel.
+   - **API Base URL**: `http://<server-lan-ip>:8000/v1`
+   - **API Key**: your `LLM_API_KEY` value (BYOK flows generally only support a bearer-style key field, not a custom header — if the field is sent as `Authorization: Bearer <value>` rather than `X-API-Key`, it won't currently authenticate against this server; Option A is the more reliable path until that's reconciled)
+4. Select `LocalAI` from the model dropdown.
 
-Use the model ID returned by:
-
-```text
-GET /v1/models
-```
-
-if the client requires an exact identifier.
+Use `GET /v1/models` (with the `X-API-Key` header) if the client needs an exact model identifier.
 
 ---
 
-<details>
-<summary><strong>Project Structure</strong></summary>
+## Project Structure
 
 ```text
-LocalAI/
-├── models/
-├── setup.sh
-├── start.sh
-├── setup.bat
-├── start.bat
-├── proxy_server.py
-└── requirements.txt
+llm-server/
+├── run.py                          # entrypoint: python run.py (or ./start.sh)
+├── setup.sh / setup.bat            # first-time install (venv, deps, CUDA/Vulkan build)
+├── start.sh / start.bat            # checks LLM_API_KEY, then runs run.py
+├── requirements.txt
+├── models/                         # your .gguf goes here
+├── docs/
+│   └── CLIENT_SECURITY.md          # how clients must store api_key/session_id
+└── app/
+    ├── config.py                   # env vars -> Settings (single source of truth)
+    ├── auth.py                     # API key check — dependency + global middleware
+    ├── tokenizer.py                # exact token counts via the model's own vocab
+    ├── cleanup.py                  # background sweep for expired sessions
+    ├── main.py                     # composition root — wires everything together
+    │
+    ├── models/
+    │   └── schemas.py              # request/response Pydantic models
+    │
+    ├── sessions/
+    │   ├── session.py              # Session entity
+    │   ├── eviction.py             # Drop / Summarize eviction strategies
+    │   ├── repository.py           # persistence interface + JSON implementation
+    │   └── store.py                # coordinates sessions, budget, eviction, TTL
+    │
+    ├── llm/
+    │   ├── gpu_detect.py           # hardware detection
+    │   ├── catalog.py              # model catalog + download
+    │   ├── server_launcher.py      # adaptive n_ctx/n_batch loop -> llama_cpp.server app
+    │   └── completion_client.py    # calls the model (loopback HTTP today)
+    │
+    └── routes/
+        └── sessions_router.py      # HTTP layer for /sessions/*
 ```
 
-`models/` is created automatically.
+`models/` and `venv/` are created automatically if missing.
 
-</details>
+---
+
+## Environment Variables
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `LLM_API_KEY` | *(required)* | Shared secret; every request needs matching `X-API-Key` header |
+| `LLM_HOST` | `0.0.0.0` | Bind address |
+| `LLM_PORT` | `8000` | Bind port |
+| `LLM_MODELS_DIR` | `models` | Where `.gguf` files are looked for/downloaded to |
+| `LLM_SESSIONS_FILE` | `sessions.json` | Persisted session store |
+| `LLM_RESERVE_FOR_RESPONSE` | `768` | Tokens always kept free for the model's reply |
+| `LLM_SESSION_TTL_DAYS` | `30` | Sessions untouched this long are purged |
+| `LLM_CLEANUP_INTERVAL_SECONDS` | `3600` | How often the TTL sweep runs |
+
+---
 
 <details>
 <summary><strong>Troubleshooting</strong></summary>
@@ -270,11 +330,19 @@ set CMAKE_BUILD_PARALLEL_LEVEL=2
 
 ### GPU is not detected
 
-The launcher supports manual GPU/VRAM override.
+Hardware detection lives in `app/llm/gpu_detect.py` — it falls back to a 4GB CPU-safe tier if nothing is recognized.
 
 ### Model initialization fails
 
-The launcher automatically tries smaller context/batch configurations. If all configurations fail, check available VRAM, system RAM, drivers, and backend installation.
+The launcher automatically tries smaller context/batch configurations (`app/llm/server_launcher.py`). If all configurations fail, check available VRAM, system RAM, drivers, and backend installation.
+
+### 401 Unauthorized on every request
+
+`LLM_API_KEY` isn't set, or the client isn't sending a matching `X-API-Key` header. The server refuses to start at all without `LLM_API_KEY` set — see `app/config.py`.
+
+### A client's context keeps overflowing / errors out
+
+If it's talking to `/v1/chat/completions` directly (e.g. Continue), it's managing its own history and needs its `contextLength` set below the server's actual `n_ctx` — see the Continue config above. If it's talking to `/sessions/{id}/chat`, the server already manages this automatically; check `app/sessions/eviction.py` if it's still misbehaving.
 
 </details>
 
@@ -283,28 +351,28 @@ The launcher automatically tries smaller context/batch configurations. If all co
 ## Architecture
 
 ```text
-VS Code / Client
-       │
-       ▼
- LocalAI Launcher
-       │
- ┌─────┴─────┐
- ▼           ▼
-GPU/VRAM    Model
-Detection   Selection
- └─────┬─────┘
-       ▼
-   GGUF Model
-       │
-       ▼
-llama-cpp-python
-   CUDA/Vulkan
-       │
-       ▼
-Adaptive Runtime
-       │
-       ▼
-OpenAI API :8000/v1
+VS Code / Phone / Laptop / Other Client
+                │
+      X-API-Key header required
+                │
+                ▼
+      APIKeyMiddleware (app/auth.py)
+                │
+        ┌───────┴────────┐
+        ▼                ▼
+ /v1/chat/completions   /sessions/*
+ (raw, client-managed   (per-device memory,
+  history)               auto token budgeting)
+        │                │
+        └───────┬────────┘
+                ▼
+      llama-cpp-python (CUDA/Vulkan)
+                │
+                ▼
+       Adaptive n_ctx/n_batch runtime
+                │
+                ▼
+            GGUF Model
 ```
 
 ## License
