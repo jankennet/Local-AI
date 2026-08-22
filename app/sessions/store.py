@@ -67,15 +67,20 @@ class SessionStore:
         return list(self._sessions.values())
 
     # ---- conversation ----------------------------------------------------
-    def add_turn(self, session_id: str, role: str, content: str) -> None:
+    def add_turn(self, session_id: str, role: str, content: str, **extra) -> None:
         s = self._sessions[session_id]
-        s.history.append({"role": role, "content": content})
+        s.history.append({"role": role, "content": content, **extra})
         s.last_active = time.time()
         self._eviction.evict(s, self._counter, self.budget)
         self._repo.save(self._sessions)
 
     def build_messages(self, session_id: str) -> list:
         return self._sessions[session_id].build_messages()
+
+    def tokens_used(self, session_id: str) -> int:
+        """Current token count for a session, using the same counting
+        logic eviction uses to decide when to shrink it."""
+        return _session_tokens(self._sessions[session_id], self._counter)
 
     # ---- age-out ---------------------------------------------------------
     def purge_expired(self) -> int:

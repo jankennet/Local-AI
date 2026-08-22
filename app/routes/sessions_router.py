@@ -2,8 +2,9 @@
 sessions_router.py
 
 HTTP layer only — translates requests/responses. All actual logic
-(budgeting, eviction, persistence, completion) lives in the collaborators
-it's handed; this file just wires them together per-request.
+(budgeting, eviction, persistence, completion, tool-calling) lives in
+the collaborators it's handed; this file just wires them together
+per-request.
 """
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -14,9 +15,10 @@ from ..models.schemas import (
 )
 from ..sessions.store import SessionStore
 from ..llm.completion_client import CompletionClient
+from ..llm.agent_loop import run_agent_turn
 
 
-def build_sessions_router(store: SessionStore, completion_client: CompletionClient) -> APIRouter:
+def build_sessions_router(store: SessionStore, completion_client: CompletionClient, tools: dict) -> APIRouter:
     router = APIRouter(dependencies=[Depends(verify_api_key)])
 
     @router.post("/sessions", response_model=NewSessionResponse)
@@ -28,7 +30,9 @@ def build_sessions_router(store: SessionStore, completion_client: CompletionClie
     def list_sessions():
         return [
             SessionInfo(session_id=s.session_id, device_name=s.device_name,
-                        turns=len(s.history), last_active=s.last_active)
+                        turns=len(s.history), last_active=s.last_active,
+                        context_used=store.tokens_used(s.session_id),
+                        context_limit=store.budget)
             for s in store.list_sessions()
         ]
 
@@ -43,10 +47,16 @@ def build_sessions_router(store: SessionStore, completion_client: CompletionClie
             raise HTTPException(status_code=404, detail="unknown session_id")
 
         store.add_turn(session_id, "user", req.message)
-        messages = store.build_messages(session_id)
-        reply = completion_client.complete(messages, req.max_tokens, req.temperature)
-        store.add_turn(session_id, "assistant", reply)
+        # run_agent_turn persists every step itself (assistant tool_calls,
+        # tool results, and the final assistant reply) — don't add_turn again here.
+        reply = run_agent_turn(store, session_id, completion_client, tools,
+                                max_tokens=req.max_tokens, temperature=req.temperature)
 
-        return ChatResponse(session_id=session_id, reply=reply)
+        return ChatResponse(
+            session_id=session_id,
+            reply=reply,
+            context_used=store.tokens_used(session_id),
+            context_limit=store.budget,
+        )
 
     return router

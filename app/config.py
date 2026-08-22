@@ -22,6 +22,8 @@ class Settings:
     reserve_for_response: int = 768
     session_ttl_days: int = 30
     cleanup_interval_seconds: int = 3600  # how often to sweep expired sessions
+    llama_server_bin: str = "llama.cpp/build/bin/llama-server"
+    internal_port: int = 8081  # native llama-server — 127.0.0.1 only, never LAN-exposed
 
 
 def load_settings() -> Settings:
@@ -43,6 +45,8 @@ def load_settings() -> Settings:
         reserve_for_response=int(os.environ.get("LLM_RESERVE_FOR_RESPONSE", "768")),
         session_ttl_days=int(os.environ.get("LLM_SESSION_TTL_DAYS", "30")),
         cleanup_interval_seconds=int(os.environ.get("LLM_CLEANUP_INTERVAL_SECONDS", "3600")),
+        llama_server_bin=os.environ.get("LLM_LLAMA_SERVER_BIN", "llama.cpp/build/bin/llama-server"),
+        internal_port=int(os.environ.get("LLM_INTERNAL_PORT", "8081")),
     )
 
 

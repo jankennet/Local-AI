@@ -28,6 +28,8 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     session_id: str
     reply: str
+    context_used: int      # tokens currently in this session (system + summary + history)
+    context_limit: int     # this session's budget (n_ctx minus the reserved response headroom)
 
 
 class SessionInfo(BaseModel):
@@ -35,3 +37,5 @@ class SessionInfo(BaseModel):
     device_name: str
     turns: int
     last_active: float
+    context_used: int
+    context_limit: int
