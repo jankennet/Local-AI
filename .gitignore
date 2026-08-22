@@ -7,3 +7,6 @@ models/*.gguf
 # Ignore Python cache files
 __pycache__/
 *.pyc
+
+# Ignore llama.cpp build directory
+llama.cpp/
