@@ -50,7 +50,8 @@ def build_sessions_router(store: SessionStore, completion_client: CompletionClie
         # run_agent_turn persists every step itself (assistant tool_calls,
         # tool results, and the final assistant reply) — don't add_turn again here.
         reply = run_agent_turn(store, session_id, completion_client, tools,
-                                max_tokens=req.max_tokens, temperature=req.temperature)
+                                max_tokens=req.max_tokens, temperature=req.temperature,
+                                rag_query=req.message)
 
         return ChatResponse(
             session_id=session_id,

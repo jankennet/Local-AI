@@ -21,9 +21,11 @@ class Settings:
     sessions_file: str = "sessions.json"
     reserve_for_response: int = 768
     session_ttl_days: int = 30
-    cleanup_interval_seconds: int = 3600  # how often to sweep expired sessions
+    cleanup_interval_seconds: int = 3600
     llama_server_bin: str = "llama.cpp/build/bin/llama-server"
-    internal_port: int = 8081  # native llama-server — 127.0.0.1 only, never LAN-exposed
+    internal_port: int = 8081
+    embedding_model: str = "BAAI/bge-small-en-v1.5"
+    embedding_model_code: str = "microsoft/codebert-base"
 
 
 def load_settings() -> Settings:
@@ -47,6 +49,8 @@ def load_settings() -> Settings:
         cleanup_interval_seconds=int(os.environ.get("LLM_CLEANUP_INTERVAL_SECONDS", "3600")),
         llama_server_bin=os.environ.get("LLM_LLAMA_SERVER_BIN", "llama.cpp/build/bin/llama-server"),
         internal_port=int(os.environ.get("LLM_INTERNAL_PORT", "8081")),
+        embedding_model=os.environ.get("LLM_EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5"),
+        embedding_model_code=os.environ.get("LLM_EMBEDDING_MODEL_CODE", "microsoft/codebert-base"),
     )
 
 

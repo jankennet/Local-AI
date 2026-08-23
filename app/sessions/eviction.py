@@ -78,3 +78,7 @@ class SummarizeOldestStrategy(EvictionStrategy):
         # Pathological fallback: even system + summary alone are too big.
         if _session_tokens(session, counter) > budget and session.summary:
             session.summary = session.summary[-max(0, len(session.summary) - 500):]
+
+        # Rebuild vector store after eviction to stay in sync
+        if session._embedding_service:
+            session.init_vector_store(session._embedding_service)

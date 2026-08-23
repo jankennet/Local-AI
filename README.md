@@ -98,6 +98,18 @@ POST   /sessions/{session_id}/chat   -> {"message": "..."} -> {"reply": "..."}
 
 Call `POST /sessions` once per device, store the returned `session_id` (see [`docs/CLIENT_SECURITY.md`](docs/CLIENT_SECURITY.md) for how — never in browser storage), then reuse it for every subsequent `POST /sessions/{id}/chat`. The server tracks token usage per session and automatically summarizes/trims older turns before the model's context window would overflow. Sessions untouched for `LLM_SESSION_TTL_DAYS` (default 30) are swept automatically.
 
+### Semantic Context Retrieval (RAG)
+
+Managed sessions (`/sessions/{id}/chat`) now use a local embedding model (default: `microsoft/codebert-base` for code, `BAAI/bge-small-en-v1.5` for general) to semantically retrieve relevant past turns instead of stuffing everything into the context window. On each user message:
+
+1. The query is embedded (combined with recent context + summary for better matching)
+2. Top-k relevant past turns are retrieved from the session's vector store
+3. Retrieved context + recent turns + summary are sent to the model
+
+This keeps full conversation history available without token overflow. Configure via `LLM_EMBEDDING_MODEL` (general) or `LLM_EMBEDDING_MODEL_CODE` (code-specialized).
+
+> **Note:** This is **conversation history RAG** (recalls what you discussed earlier). It is **not** Continue's `@codebase` — that feature indexes your **repository files** separately and requires Continue's own config (`context.providers.codebase`). They work together: `@codebase` brings in relevant code files; server RAG brings in relevant past conversation turns.
+
 ---
 
 ## Agent Capabilities (Experimental)
@@ -328,6 +340,8 @@ llm-server/
 | `LLM_RESERVE_FOR_RESPONSE` | `768` | Tokens always kept free for the model's reply |
 | `LLM_SESSION_TTL_DAYS` | `30` | Sessions untouched this long are purged |
 | `LLM_CLEANUP_INTERVAL_SECONDS` | `3600` | How often the TTL sweep runs |
+| `LLM_EMBEDDING_MODEL` | `BAAI/bge-small-en-v1.5` | General-purpose embedding model (CPU-only) |
+| `LLM_EMBEDDING_MODEL_CODE` | `microsoft/codebert-base` | Code-specialized embedding model for conversation RAG (default, CPU-only) |
 
 ---
 

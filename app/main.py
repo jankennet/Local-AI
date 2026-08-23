@@ -29,6 +29,7 @@ from .tokenizer import LlamaVocabTokenCounter
 from .sessions.repository import JSONSessionRepository
 from .sessions.eviction import SummarizeOldestStrategy
 from .sessions.store import SessionStore
+from .embeddings import EmbeddingService
 from .llm.gpu_detect import detect_gpu, get_vram_tier
 from .llm.catalog import get_existing_models, download_model, MODEL_CATALOG
 from .llm.server_launcher import launch_llama_server, terminate_process
@@ -75,6 +76,7 @@ def create_app() -> FastAPI:
     counter = LlamaVocabTokenCounter(model_path)
     repository = JSONSessionRepository(settings.sessions_file)
     eviction = SummarizeOldestStrategy()
+    embedding_service = EmbeddingService(settings.embedding_model_code)
     store = SessionStore(
         counter=counter,
         repository=repository,
@@ -82,6 +84,7 @@ def create_app() -> FastAPI:
         n_ctx=selected_config["n_ctx"],
         reserve_for_response=settings.reserve_for_response,
         ttl_days=settings.session_ttl_days,
+        embedding_service=embedding_service,
     )
     completion_client = LoopbackCompletionClient(base_url)
 

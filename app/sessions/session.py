@@ -8,6 +8,9 @@ budget) is deliberately kept in separate collaborators (SRP).
 
 from dataclasses import dataclass, field, asdict
 import time
+from typing import List, Optional, Tuple
+
+from ..embeddings import EmbeddingService, SimpleVectorStore
 
 
 @dataclass
@@ -15,20 +18,55 @@ class Session:
     session_id: str
     device_name: str = "unknown device"
     system_prompt: str = "You are a helpful assistant."
-    history: list = field(default_factory=list)  # list[{"role":.., "content":..}]
+    history: list = field(default_factory=list)
     summary: str = ""
     created_at: float = field(default_factory=time.time)
     last_active: float = field(default_factory=time.time)
 
+    _vector_store: Optional[SimpleVectorStore] = field(default=None, repr=False, compare=False)
+    _embedding_service: Optional[EmbeddingService] = field(default=None, repr=False, compare=False)
+
     def to_dict(self) -> dict:
-        return asdict(self)
+        d = asdict(self)
+        d.pop("_vector_store", None)
+        d.pop("_embedding_service", None)
+        return d
 
     @classmethod
     def from_dict(cls, data: dict) -> "Session":
-        return cls(**data)
+        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
 
-    def build_messages(self) -> list:
+    def init_vector_store(self, embedding_service: EmbeddingService) -> None:
+        self._embedding_service = embedding_service
+        self._vector_store = SimpleVectorStore(embedding_service)
+        for i, msg in enumerate(self.history):
+            content = msg.get("content") or ""
+            if content.strip():
+                self._vector_store.add(content, {"turn_index": i, "role": msg.get("role")})
+
+    def add_to_vector_store(self, role: str, content: str, turn_index: int) -> None:
+        if self._vector_store and content.strip():
+            self._vector_store.add(content, {"turn_index": turn_index, "role": role})
+
+    def retrieve_relevant(self, query: str, top_k: int = 3) -> List[Tuple[float, str, dict]]:
+        if not self._vector_store:
+            return []
+        return self._vector_store.search(query, top_k)
+
+    def build_messages(self, use_rag: bool = False, query: Optional[str] = None, rag_top_k: int = 3) -> list:
         msgs = [{"role": "system", "content": self.system_prompt}]
+
+        if use_rag and query and self._vector_store:
+            # Build a better retrieval query: combine user message with recent context + summary
+            recent_context = " ".join(
+                (m.get("content") or "") for m in self.history[-3:] if m.get("content")
+            )
+            retrieval_query = f"{query} {self.summary} {recent_context}".strip()
+            retrieved = self.retrieve_relevant(retrieval_query, rag_top_k)
+            if retrieved:
+                context_lines = [f"[Relevant context]: {text}" for _, text, _ in retrieved]
+                msgs.append({"role": "system", "content": "\n".join(context_lines)})
+
         if self.summary:
             msgs.append({"role": "system",
                          "content": f"[Earlier conversation summary]: {self.summary}"})

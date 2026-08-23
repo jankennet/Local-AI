@@ -19,6 +19,7 @@ from .session import Session
 from .repository import SessionRepository
 from .eviction import EvictionStrategy, _session_tokens
 from ..tokenizer import TokenCounter
+from ..embeddings import EmbeddingService
 
 
 class SessionStore:
@@ -30,6 +31,7 @@ class SessionStore:
         n_ctx: int,
         reserve_for_response: int = 768,
         ttl_days: int = 30,
+        embedding_service: Optional[EmbeddingService] = None,
     ):
         self._counter = counter
         self._repo = repository
@@ -37,7 +39,14 @@ class SessionStore:
         self._n_ctx = n_ctx
         self._reserve = reserve_for_response
         self._ttl_seconds = ttl_days * 86400
+        self._embedding_service = embedding_service
         self._sessions: Dict[str, Session] = self._repo.load()
+        self._init_vector_stores()
+
+    def _init_vector_stores(self) -> None:
+        if self._embedding_service:
+            for s in self._sessions.values():
+                s.init_vector_store(self._embedding_service)
 
     @property
     def budget(self) -> int:
@@ -52,6 +61,8 @@ class SessionStore:
             device_name=device_name,
             system_prompt=system_prompt or "You are a helpful assistant.",
         )
+        if self._embedding_service:
+            s.init_vector_store(self._embedding_service)
         self._sessions[sid] = s
         self._repo.save(self._sessions)
         return s
@@ -69,13 +80,18 @@ class SessionStore:
     # ---- conversation ----------------------------------------------------
     def add_turn(self, session_id: str, role: str, content: str, **extra) -> None:
         s = self._sessions[session_id]
+        turn_index = len(s.history)
         s.history.append({"role": role, "content": content, **extra})
         s.last_active = time.time()
+        if self._embedding_service:
+            s.add_to_vector_store(role, content, turn_index)
         self._eviction.evict(s, self._counter, self.budget)
+        if self._embedding_service:
+            s.init_vector_store(self._embedding_service)
         self._repo.save(self._sessions)
 
-    def build_messages(self, session_id: str) -> list:
-        return self._sessions[session_id].build_messages()
+    def build_messages(self, session_id: str, use_rag: bool = False, query: Optional[str] = None, rag_top_k: int = 3) -> list:
+        return self._sessions[session_id].build_messages(use_rag=use_rag, query=query, rag_top_k=rag_top_k)
 
     def tokens_used(self, session_id: str) -> int:
         """Current token count for a session, using the same counting

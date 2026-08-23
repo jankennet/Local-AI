@@ -24,6 +24,7 @@ def run_agent_turn(
     tools: dict,
     max_tokens: int = 512,
     temperature: float = 0.7,
+    rag_query: str = None,
 ) -> str:
     """Runs the tool-call loop for the pending user turn on `session_id`.
     Returns the final assistant reply text. Every step (assistant
@@ -32,7 +33,8 @@ def run_agent_turn(
     tool_schemas = [t["schema"] for t in tools.values()]
 
     for _ in range(MAX_TOOL_ROUNDS):
-        messages = store.build_messages(session_id)
+        messages = store.build_messages(session_id, use_rag=rag_query is not None, query=rag_query)
+
         message = completion_client.complete_with_tools(
             messages, tool_schemas, max_tokens, temperature
         )
