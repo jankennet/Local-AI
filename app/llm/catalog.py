@@ -34,15 +34,15 @@ MODEL_CATALOG = {
             "filename": "Llama-3.2-3B-Instruct-Q8_0.gguf", "size": "~3.4 GB"},
     },
     "8GB": {
+        "Qwen 2.5 7B (Q4_K_M - Reliable Tool-Calling & General Chat - ~4.7GB)": {
+            "repo_id": "bartowski/Qwen2.5-7B-Instruct-GGUF",
+            "filename": "Qwen2.5-7B-Instruct-Q4_K_M.gguf", "size": "~4.7 GB"},
         "Llama 3.1 8B Instruct (Meta Flagship General AI - ~4.9GB)": {
             "repo_id": "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF",
             "filename": "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf", "size": "~4.9 GB"},
-        "Qwen 2.5 Coder 7B (Q4_K_M - Best for Coding & VS Code - ~4.7GB)": {
+        "Qwen 2.5 Coder 7B (Q4_K_M - Strong at Code, Unreliable Tool-Calling - ~4.7GB)": {
             "repo_id": "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF",
             "filename": "qwen2.5-coder-7b-instruct-q4_k_m.gguf", "size": "~4.7 GB"},
-        "Qwen 2.5 7B (Q4_K_M - Top General Chat & Math - ~4.7GB)": {
-            "repo_id": "Qwen/Qwen2.5-7B-Instruct-GGUF",
-            "filename": "qwen2.5-7b-instruct-q4_k_m.gguf", "size": "~4.7 GB"},
     },
 }
 

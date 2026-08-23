@@ -15,6 +15,8 @@ Designed for local development, coding assistants (VS Code's **Continue**, **Roo
 - Interactive GGUF model download
 - Full GPU offloading
 - Adaptive `n_ctx` / `n_batch` with automatic fallback to safer configurations
+- Built-in ReAct agent loop with tool calling (web search, code exec, file ops)
+- GPU watchdog for health monitoring
 - Bound to `0.0.0.0` — accessible from any device on your network, not just localhost
 
 ---
@@ -78,9 +80,12 @@ X-API-Key: <your LLM_API_KEY>
 ```text
 GET  /v1/models
 POST /v1/chat/completions
+POST /v1/agent/chat          # ReAct agent with tools
 ```
 
 Works with any OpenAI-compatible client. The client is responsible for sending its own conversation history each time — nothing is remembered server-side on this path. Useful for tools (like Continue) that already manage their own context.
+
+Add `"agent": true` to the chat completions request body, or use `/v1/agent/chat` directly, to invoke the ReAct agent with tool access.
 
 ### Managed sessions (per-device memory)
 
@@ -95,13 +100,28 @@ Call `POST /sessions` once per device, store the returned `session_id` (see [`do
 
 ---
 
+## Agent Capabilities (Experimental)
+
+The server includes a built-in ReAct-style agent (`app/llm/agent_loop.py`) with these tools:
+
+| Tool | Description |
+|---|---|
+| `web_search` | DuckDuckGo HTML scrape (no API key) |
+| `code_exec` | Sandboxed Python execution |
+| `file_read` / `file_write` | Workspace file operations |
+| `shell` | Restricted command execution |
+
+Enable by adding `agent: true` to your chat request body, or use the `/v1/agent/chat` endpoint. The agent runs server-side with the same session memory and token budgeting.
+
+---
+
 ## Recommended Models
 
 | VRAM | Recommended Model | Quantization |
 |---:|---|---|
 | ≤ 5GB | Qwen 2.5 3B Instruct | Q4_K_M |
-| 6–7GB | Qwen 2.5 Coder 7B | Q3_K_M |
-| ≥ 8GB | Qwen 2.5 Coder 7B | Q4_K_M |
+| 6–7GB | Qwen 2.5 7B | Q3_K_M |
+| ≥ 8GB | Qwen 2.5 7B | Q4_K_M |
 
 The launcher provides additional models for each tier.
 
@@ -116,14 +136,14 @@ The launcher provides additional models for each tier.
 
 ### 6GB
 
-- **Qwen 2.5 Coder 7B** — Q3_K_M (~3.8 GB)
+- **Qwen 2.5 7B** — Q3_K_M (~3.8 GB)
 - **Qwen 2.5 7B** — Q3_K_M (~3.8 GB)
 - **Llama 3.2 3B** — Q8_0 (~3.4 GB)
 
 ### 8GB
 
 - **Llama 3.1 8B** — Q4_K_M (~4.9 GB)
-- **Qwen 2.5 Coder 7B** — Q4_K_M (~4.7 GB)
+- **Qwen 2.5 7B** — Q4_K_M (~4.7 GB)
 - **Qwen 2.5 7B** — Q4_K_M (~4.7 GB)
 
 </details>
@@ -282,13 +302,17 @@ llm-server/
     │   ├── gpu_detect.py           # hardware detection
     │   ├── catalog.py              # model catalog + download
     │   ├── server_launcher.py      # adaptive n_ctx/n_batch loop -> llama_cpp.server app
-    │   └── completion_client.py    # calls the model (loopback HTTP today)
+    │   ├── completion_client.py    # calls the model (loopback HTTP today)
+    │   ├── agent_loop.py           # ReAct-style agent loop with tool calling
+    │   ├── tools.py                # built-in tools (web search, code exec, etc.)
+    │   └── watchdog.py             # GPU/health monitoring
     │
     └── routes/
         └── sessions_router.py      # HTTP layer for /sessions/*
+        └── proxy_router.py         # OpenAI-compatible /v1/* proxy + auth
 ```
 
-`models/` and `venv/` are created automatically if missing.
+`models/`, `venv/`, and `llama.cpp/` are created automatically if missing.
 
 ---
 
@@ -358,18 +382,17 @@ VS Code / Phone / Laptop / Other Client
                 ▼
       APIKeyMiddleware (app/auth.py)
                 │
-        ┌───────┴────────┐
-        ▼                ▼
- /v1/chat/completions   /sessions/*
- (raw, client-managed   (per-device memory,
-  history)               auto token budgeting)
-        │                │
-        └───────┬────────┘
+        ┌───────┼────────┐
+        ▼       ▼        ▼
+ /v1/*      /sessions/*  /v1/agent/chat
+(proxy)    (managed)     (ReAct agent)
+        │       │        │
+        └───────┼────────┘
                 ▼
       llama-cpp-python (CUDA/Vulkan)
                 │
                 ▼
-       Adaptive n_ctx/n_batch runtime
+        Adaptive n_ctx/n_batch runtime
                 │
                 ▼
             GGUF Model

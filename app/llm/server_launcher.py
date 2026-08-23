@@ -93,6 +93,21 @@ def terminate_process(process: subprocess.Popen) -> None:
         process.kill()
 
 
+def relaunch_with_config(binary: str, model_path: str, host: str, port: int, config: dict):
+    """Try relaunching with the exact config that already worked once —
+    used by the watchdog to recover from a crash without re-running the
+    whole adaptive search. Returns (process, base_url) or None on failure."""
+    cmd = _build_command(binary, model_path, host, port, config)
+    process = subprocess.Popen(cmd)
+    base_url = f"http://{host}:{port}"
+
+    if _wait_until_healthy(base_url, process, time.time() + HEALTH_TIMEOUT_SECONDS):
+        return process, base_url
+
+    terminate_process(process)
+    return None
+
+
 def launch_llama_server(binary: str, model_path: str, host: str, port: int, vram_tier: str):
     """Returns (process, base_url, selected_config). Raises RuntimeError if
     every config in the tier fails to come up healthy."""

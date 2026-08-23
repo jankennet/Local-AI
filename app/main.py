@@ -17,6 +17,7 @@ as before.
 """
 
 import asyncio
+import logging
 import subprocess
 from contextlib import asynccontextmanager
 
@@ -31,10 +32,17 @@ from .sessions.store import SessionStore
 from .llm.gpu_detect import detect_gpu, get_vram_tier
 from .llm.catalog import get_existing_models, download_model, MODEL_CATALOG
 from .llm.server_launcher import launch_llama_server, terminate_process
+from .llm.watchdog import watch_llama_server
 from .llm.completion_client import LoopbackCompletionClient
 from .llm.tools import TOOLS
 from .routes.sessions_router import build_sessions_router
 from .routes.proxy_router import build_proxy_router
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
+logger = logging.getLogger(__name__)
 
 
 def resolve_model_path() -> tuple[str, str]:
@@ -77,12 +85,23 @@ def create_app() -> FastAPI:
     )
     completion_client = LoopbackCompletionClient(base_url)
 
+    # Mutable holders — the watchdog replaces these in place if it has to
+    # relaunch the process, so completion_client (which already points at
+    # a fixed host:port, unaffected by a relaunch) doesn't need to change.
+    process_holder = {"process": process}
+    config_holder = {"config": selected_config}
+
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         cleanup_task = asyncio.create_task(periodic_cleanup(store, settings.cleanup_interval_seconds))
+        watchdog_task = asyncio.create_task(watch_llama_server(
+            settings.llama_server_bin, model_path, "127.0.0.1", settings.internal_port,
+            vram_tier, process_holder, config_holder,
+        ))
         yield
         cleanup_task.cancel()
-        terminate_process(process)  # stop the native llama-server subprocess too
+        watchdog_task.cancel()
+        terminate_process(process_holder["process"])  # stop the native llama-server subprocess too
 
     app = FastAPI(lifespan=lifespan)
     app.include_router(build_sessions_router(store, completion_client, TOOLS))
