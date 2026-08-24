@@ -10,6 +10,14 @@ manager later), this is the only file that touches.
 import os
 import sys
 from dataclasses import dataclass
+from pathlib import Path
+
+# Load .env file if present (created by setup.sh/setup.bat)
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).parent.parent / ".env")
+except Exception:
+    pass
 
 
 @dataclass(frozen=True)

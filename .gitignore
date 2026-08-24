@@ -21,6 +21,9 @@ qdrant_db/
 *.swo
 *~
 
+# Dev stuff
+.env/
+
 # OS noise
 .DS_Store
 Thumbs.db

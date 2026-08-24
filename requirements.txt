@@ -8,5 +8,6 @@ huggingface_hub
 requests
 sentence-transformers>=2.2.0
 qdrant-client>=1.9.0
+python-dotenv>=1.0.0
 # llama-cpp-python is installed separately via setup.sh/setup.bat with
 # hardware-specific build flags (e.g. Vulkan for AMD) — not pinned here.

@@ -17,6 +17,9 @@ Designed for local development, coding assistants (VS Code's **Continue**, **Roo
 - Adaptive `n_ctx` / `n_batch` with automatic fallback to safer configurations
 - Built-in ReAct agent loop with tool calling (web search, code exec, file ops)
 - GPU watchdog for health monitoring
+- **Semantic conversation RAG** — vector store (Qdrant or in-memory) retrieves relevant past turns
+- **Configurable embedding model** — select during setup or via env var
+- **Debug endpoints** — inspect vector store, search, add test vectors
 - Bound to `0.0.0.0` — accessible from any device on your network, not just localhost
 
 ---
@@ -47,6 +50,8 @@ The launcher automatically:
 Detect GPU
    ↓
 Detect VRAM
+   ↓
+Select embedding model for RAG
    ↓
 Select model tier
    ↓
@@ -98,15 +103,35 @@ POST   /sessions/{session_id}/chat   -> {"message": "..."} -> {"reply": "..."}
 
 Call `POST /sessions` once per device, store the returned `session_id` (see [`docs/CLIENT_SECURITY.md`](docs/CLIENT_SECURITY.md) for how — never in browser storage), then reuse it for every subsequent `POST /sessions/{id}/chat`. The server tracks token usage per session and automatically summarizes/trims older turns before the model's context window would overflow. Sessions untouched for `LLM_SESSION_TTL_DAYS` (default 30) are swept automatically.
 
+### Debug endpoints (vector store inspection)
+
+Enable with `LLM_ENABLE_DEBUG=true`:
+
+```text
+GET    /debug/vector/stats           -> vector store stats (backend, count, model, dim)
+POST   /debug/vector/add             -> add test vector with metadata
+POST   /debug/vector/search          -> semantic search (optional session_id filter)
+DELETE /debug/vector/clear           -> clear all vectors
+GET    /debug/sessions/{id}/vectors  -> inspect session's vector state
+```
+
+Useful for testing embedding quality, verifying persistence, and debugging RAG retrieval.
+
 ### Semantic Context Retrieval (RAG)
 
-Managed sessions (`/sessions/{id}/chat`) now use a local embedding model (default: `microsoft/codebert-base` for code, `BAAI/bge-small-en-v1.5` for general) to semantically retrieve relevant past turns instead of stuffing everything into the context window. On each user message:
+Managed sessions (`/sessions/{id}/chat`) use a local embedding model to semantically retrieve relevant past turns instead of stuffing everything into the context window. On each user message:
 
 1. The query is embedded (combined with recent context + summary for better matching)
 2. Top-k relevant past turns are retrieved from the session's vector store
 3. Retrieved context + recent turns + summary are sent to the model
 
 This keeps full conversation history available without token overflow. Configure via `LLM_EMBEDDING_MODEL` (general) or `LLM_EMBEDDING_MODEL_CODE` (code-specialized).
+
+**Vector store backends:**
+- **Qdrant (default)** — persistent, disk-based (`./qdrant_db/`), supports metadata filtering, scales to millions of vectors
+- **Simple (in-memory)** — no dependencies, lost on restart, good for testing
+
+Switch via `LLM_VECTOR_BACKEND=qdrant|simple`.
 
 > **Note:** This is **conversation history RAG** (recalls what you discussed earlier). It is **not** Continue's `@codebase` — that feature indexes your **repository files** separately and requires Continue's own config (`context.providers.codebase`). They work together: `@codebase` brings in relevant code files; server RAG brings in relevant past conversation turns.
 
@@ -288,14 +313,16 @@ Use `GET /v1/models` (with the `X-API-Key` header) if the client needs an exact 
 ```text
 llm-server/
 ├── run.py                          # entrypoint: python run.py (or ./start.sh)
-├── setup.sh / setup.bat            # first-time install (venv, deps, CUDA/Vulkan build)
+├── setup.sh / setup.bat            # first-time install (venv, deps, CUDA/Vulkan build, embedding model selection)
 ├── start.sh / start.bat            # checks LLM_API_KEY, then runs run.py
 ├── requirements.txt
 ├── models/                         # your .gguf goes here
+├── qdrant_db/                      # vector store data (created at runtime, in .gitignore)
+├── .env                            # created by setup.sh/.bat, holds embedding model choice
 ├── docs/
 │   └── CLIENT_SECURITY.md          # how clients must store api_key/session_id
 └── app/
-    ├── config.py                   # env vars -> Settings (single source of truth)
+    ├── config.py                   # env vars -> Settings (single source of truth, loads .env)
     ├── auth.py                     # API key check — dependency + global middleware
     ├── tokenizer.py                # exact token counts via the model's own vocab
     ├── cleanup.py                  # background sweep for expired sessions
@@ -320,8 +347,9 @@ llm-server/
     │   └── watchdog.py             # GPU/health monitoring
     │
     └── routes/
-        └── sessions_router.py      # HTTP layer for /sessions/*
-        └── proxy_router.py         # OpenAI-compatible /v1/* proxy + auth
+        ├── sessions_router.py      # HTTP layer for /sessions/*
+        ├── proxy_router.py         # OpenAI-compatible /v1/* proxy + auth
+        └── debug_router.py         # debug endpoints for vector store (/debug/vector/*)
 ```
 
 `models/`, `venv/`, and `llama.cpp/` are created automatically if missing.
@@ -342,8 +370,12 @@ llm-server/
 | `LLM_CLEANUP_INTERVAL_SECONDS` | `3600` | How often the TTL sweep runs |
 | `LLM_EMBEDDING_MODEL` | `BAAI/bge-small-en-v1.5` | General-purpose embedding model (CPU-only) |
 | `LLM_EMBEDDING_MODEL_CODE` | `microsoft/codebert-base` | Code-specialized embedding model for conversation RAG (default, CPU-only) |
+| `LLM_VECTOR_BACKEND` | `qdrant` | Vector store: `qdrant` (persistent) or `simple` (in-memory) |
+| `LLM_VECTOR_DB_PATH` | `./qdrant_db` | Path for Qdrant data |
+| `LLM_VECTOR_COLLECTION` | `conversations` | Qdrant collection name |
+| `LLM_ENABLE_DEBUG` | `false` | Enable `/debug/vector/*` endpoints |
 
----
+All variables can also be set in a `.env` file at the project root (created by `setup.sh` / `setup.bat`).
 
 <details>
 <summary><strong>Troubleshooting</strong></summary>
