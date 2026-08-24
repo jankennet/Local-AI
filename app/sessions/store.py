@@ -13,13 +13,13 @@ backend, or eviction policy — only the composition root (main.py) does.
 
 import time
 import uuid
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 from .session import Session
 from .repository import SessionRepository
 from .eviction import EvictionStrategy, _session_tokens
 from ..tokenizer import TokenCounter
-from ..embeddings import EmbeddingService
+from ..embeddings import EmbeddingService, VectorStore
 
 
 class SessionStore:
@@ -32,6 +32,7 @@ class SessionStore:
         reserve_for_response: int = 768,
         ttl_days: int = 30,
         embedding_service: Optional[EmbeddingService] = None,
+        vector_store_factory: Optional[Callable[[EmbeddingService], VectorStore]] = None,
     ):
         self._counter = counter
         self._repo = repository
@@ -40,13 +41,14 @@ class SessionStore:
         self._reserve = reserve_for_response
         self._ttl_seconds = ttl_days * 86400
         self._embedding_service = embedding_service
+        self._vector_store_factory = vector_store_factory
         self._sessions: Dict[str, Session] = self._repo.load()
         self._init_vector_stores()
 
     def _init_vector_stores(self) -> None:
         if self._embedding_service:
             for s in self._sessions.values():
-                s.init_vector_store(self._embedding_service)
+                s.init_vector_store(self._embedding_service, self._vector_store_factory)
 
     @property
     def budget(self) -> int:
@@ -62,7 +64,7 @@ class SessionStore:
             system_prompt=system_prompt or "You are a helpful assistant.",
         )
         if self._embedding_service:
-            s.init_vector_store(self._embedding_service)
+            s.init_vector_store(self._embedding_service, self._vector_store_factory)
         self._sessions[sid] = s
         self._repo.save(self._sessions)
         return s
@@ -87,7 +89,7 @@ class SessionStore:
             s.add_to_vector_store(role, content, turn_index)
         self._eviction.evict(s, self._counter, self.budget)
         if self._embedding_service:
-            s.init_vector_store(self._embedding_service)
+            s.init_vector_store(self._embedding_service, self._vector_store_factory)
         self._repo.save(self._sessions)
 
     def build_messages(self, session_id: str, use_rag: bool = False, query: Optional[str] = None, rag_top_k: int = 3) -> list:

@@ -26,6 +26,9 @@ class Settings:
     internal_port: int = 8081
     embedding_model: str = "BAAI/bge-small-en-v1.5"
     embedding_model_code: str = "microsoft/codebert-base"
+    vector_backend: str = "qdrant"
+    vector_db_path: str = "./qdrant_db"
+    vector_collection: str = "conversations"
 
 
 def load_settings() -> Settings:
@@ -51,6 +54,9 @@ def load_settings() -> Settings:
         internal_port=int(os.environ.get("LLM_INTERNAL_PORT", "8081")),
         embedding_model=os.environ.get("LLM_EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5"),
         embedding_model_code=os.environ.get("LLM_EMBEDDING_MODEL_CODE", "microsoft/codebert-base"),
+        vector_backend=os.environ.get("LLM_VECTOR_BACKEND", "qdrant"),
+        vector_db_path=os.environ.get("LLM_VECTOR_DB_PATH", "./qdrant_db"),
+        vector_collection=os.environ.get("LLM_VECTOR_COLLECTION", "conversations"),
     )
 
 

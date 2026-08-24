@@ -29,7 +29,7 @@ from .tokenizer import LlamaVocabTokenCounter
 from .sessions.repository import JSONSessionRepository
 from .sessions.eviction import SummarizeOldestStrategy
 from .sessions.store import SessionStore
-from .embeddings import EmbeddingService
+from .embeddings import EmbeddingService, create_vector_store
 from .llm.gpu_detect import detect_gpu, get_vram_tier
 from .llm.catalog import get_existing_models, download_model, MODEL_CATALOG
 from .llm.server_launcher import launch_llama_server, terminate_process
@@ -38,6 +38,7 @@ from .llm.completion_client import LoopbackCompletionClient
 from .llm.tools import TOOLS
 from .routes.sessions_router import build_sessions_router
 from .routes.proxy_router import build_proxy_router
+from .routes.debug_router import build_debug_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -77,6 +78,12 @@ def create_app() -> FastAPI:
     repository = JSONSessionRepository(settings.sessions_file)
     eviction = SummarizeOldestStrategy()
     embedding_service = EmbeddingService(settings.embedding_model_code)
+    vector_store_factory = lambda es: create_vector_store(
+        es,
+        backend=settings.vector_backend,
+        path=settings.vector_db_path,
+        collection_name=settings.vector_collection,
+    )
     store = SessionStore(
         counter=counter,
         repository=repository,
@@ -85,6 +92,7 @@ def create_app() -> FastAPI:
         reserve_for_response=settings.reserve_for_response,
         ttl_days=settings.session_ttl_days,
         embedding_service=embedding_service,
+        vector_store_factory=vector_store_factory,
     )
     completion_client = LoopbackCompletionClient(base_url)
 
@@ -109,6 +117,10 @@ def create_app() -> FastAPI:
     app = FastAPI(lifespan=lifespan)
     app.include_router(build_sessions_router(store, completion_client, TOOLS))
     app.include_router(build_proxy_router(base_url))
+    app.include_router(build_debug_router(
+        store, embedding_service,
+        settings.vector_backend, settings.vector_db_path, settings.vector_collection,
+    ))
     return app
 
 

@@ -10,3 +10,30 @@ __pycache__/
 
 # Ignore llama.cpp build directory
 llama.cpp/
+
+# Qdrant vector database
+qdrant_db/
+
+# IDE/editor noise
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# Test/coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Logs
+*.log
+logs/
+
+# Temp
+tmp/
+*.tmp

@@ -6,11 +6,11 @@ behavior lives here beyond simple data — logic (eviction, persistence,
 budget) is deliberately kept in separate collaborators (SRP).
 """
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, fields
 import time
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Callable
 
-from ..embeddings import EmbeddingService, SimpleVectorStore
+from ..embeddings import EmbeddingService, VectorStore
 
 
 @dataclass
@@ -23,22 +23,29 @@ class Session:
     created_at: float = field(default_factory=time.time)
     last_active: float = field(default_factory=time.time)
 
-    _vector_store: Optional[SimpleVectorStore] = field(default=None, repr=False, compare=False)
-    _embedding_service: Optional[EmbeddingService] = field(default=None, repr=False, compare=False)
+    # Non-serialized runtime fields
+    _vector_store: Optional[VectorStore] = field(default=None, init=False, repr=False, compare=False)
+    _embedding_service: Optional[EmbeddingService] = field(default=None, init=False, repr=False, compare=False)
 
     def to_dict(self) -> dict:
-        d = asdict(self)
-        d.pop("_vector_store", None)
-        d.pop("_embedding_service", None)
-        return d
+        # Only serialize actual dataclass fields (excludes init=False fields)
+        return {f.name: getattr(self, f.name) for f in fields(self) if f.init}
 
     @classmethod
     def from_dict(cls, data: dict) -> "Session":
         return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
 
-    def init_vector_store(self, embedding_service: EmbeddingService) -> None:
+    def init_vector_store(
+        self,
+        embedding_service: EmbeddingService,
+        store_factory: Optional[Callable[[EmbeddingService], VectorStore]] = None,
+    ) -> None:
         self._embedding_service = embedding_service
-        self._vector_store = SimpleVectorStore(embedding_service)
+        if store_factory:
+            self._vector_store = store_factory(embedding_service)
+        else:
+            from ..embeddings import SimpleVectorStore
+            self._vector_store = SimpleVectorStore(embedding_service)
         for i, msg in enumerate(self.history):
             content = msg.get("content") or ""
             if content.strip():
