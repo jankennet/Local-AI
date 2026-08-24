@@ -8,19 +8,17 @@ Designed for local development, coding assistants (VS Code's **Continue**, **Roo
 
 - OpenAI-compatible API (`/v1/chat/completions`, `/v1/models`, ...)
 - Per-device session memory — each client gets its own conversation, tracked server-side
-- Automatic token-budget management: sessions are summarized/trimmed before they overflow the model's context window, instead of erroring out
-- Sessions auto-expire after a configurable TTL (default 30 days)
-- API-key authentication on every route, including the raw OpenAI-compatible ones
+- Automatic token-budget management: sessions are summarized/trimmed before they overflow the model's context window
+- Sessions auto-expire after configurable TTL (default 30 days)
+- API-key authentication on every route
 - Automatic GPU + VRAM detection, CUDA/Vulkan backend selection
-- Interactive GGUF model download
-- Full GPU offloading
-- Adaptive `n_ctx` / `n_batch` with automatic fallback to safer configurations
+- Interactive GGUF model download with adaptive `n_ctx` / `n_batch` fallback
 - Built-in ReAct agent loop with tool calling (web search, code exec, file ops)
 - GPU watchdog for health monitoring
 - **Semantic conversation RAG** — vector store (Qdrant or in-memory) retrieves relevant past turns
-- **Configurable embedding model** — select during setup or via env var
+- **Configurable embedding model** — select during setup
 - **Debug endpoints** — inspect vector store, search, add test vectors
-- Bound to `0.0.0.0` — accessible from any device on your network, not just localhost
+- Bound to `0.0.0.0` — accessible from any device on your network
 
 ---
 
@@ -45,55 +43,39 @@ start.bat
 ```
 
 The launcher automatically:
+1. Detects GPU + VRAM
+2. Prompts for embedding model (for RAG)
+3. Downloads recommended GGUF for your VRAM tier
+4. Finds a working `n_ctx`/`n_batch` configuration
+5. Starts API on `0.0.0.0:8000` with background session cleanup
 
-```text
-Detect GPU
-   ↓
-Detect VRAM
-   ↓
-Select embedding model for RAG
-   ↓
-Select model tier
-   ↓
-Find or download a GGUF in models/
-   ↓
-Find a working n_ctx/n_batch configuration
-   ↓
-Start OpenAI-compatible API + session endpoints, on 0.0.0.0:8000
-   ↓
-Start background sweep for expired sessions
-```
-
-Drop your `.gguf` file in `models/` at the project root before starting (see [Project Structure](#project-structure)) — if none is present, the launcher downloads the top recommendation for your detected VRAM tier automatically.
+Drop your `.gguf` in `models/` before starting — if missing, the launcher downloads one automatically.
 
 ---
 
 ## API
 
-```text
+```
 http://<server-lan-ip>:8000/v1
 ```
 
-Every request — including the raw OpenAI-compatible ones — requires:
-
-```text
+Every request requires:
+```
 X-API-Key: <your LLM_API_KEY>
 ```
 
-### Raw completions (no memory)
-
+### Raw completions (no server memory)
 ```text
 GET  /v1/models
 POST /v1/chat/completions
 POST /v1/agent/chat          # ReAct agent with tools
 ```
 
-Works with any OpenAI-compatible client. The client is responsible for sending its own conversation history each time — nothing is remembered server-side on this path. Useful for tools (like Continue) that already manage their own context.
+Works with any OpenAI-compatible client. Client sends full history each time — nothing remembered server-side.
 
-Add `"agent": true` to the chat completions request body, or use `/v1/agent/chat` directly, to invoke the ReAct agent with tool access.
+Add `"agent": true` to request body, or use `/v1/agent/chat` directly.
 
 ### Managed sessions (per-device memory)
-
 ```text
 POST   /sessions                     -> {"session_id": "..."}
 GET    /sessions                     -> list of active sessions
@@ -101,54 +83,35 @@ DELETE /sessions/{session_id}
 POST   /sessions/{session_id}/chat   -> {"message": "..."} -> {"reply": "..."}
 ```
 
-Call `POST /sessions` once per device, store the returned `session_id` (see [`docs/CLIENT_SECURITY.md`](docs/CLIENT_SECURITY.md) for how — never in browser storage), then reuse it for every subsequent `POST /sessions/{id}/chat`. The server tracks token usage per session and automatically summarizes/trims older turns before the model's context window would overflow. Sessions untouched for `LLM_SESSION_TTL_DAYS` (default 30) are swept automatically.
+Call `POST /sessions` once per device, store `session_id`, then reuse for every `POST /sessions/{id}/chat`. Server tracks tokens, summarizes/trims before overflow. Sessions untouched 30 days are purged.
 
 ### Debug endpoints (vector store inspection)
-
 Enable with `LLM_ENABLE_DEBUG=true`:
-
 ```text
-GET    /debug/vector/stats           -> vector store stats (backend, count, model, dim)
+GET    /debug/vector/stats           -> stats (backend, count, model, dim)
 POST   /debug/vector/add             -> add test vector with metadata
 POST   /debug/vector/search          -> semantic search (optional session_id filter)
 DELETE /debug/vector/clear           -> clear all vectors
 GET    /debug/sessions/{id}/vectors  -> inspect session's vector state
 ```
 
-Useful for testing embedding quality, verifying persistence, and debugging RAG retrieval.
+---
 
-### Semantic Context Retrieval (RAG)
+## Semantic Context Retrieval (RAG)
 
-Managed sessions (`/sessions/{id}/chat`) use a local embedding model to semantically retrieve relevant past turns instead of stuffing everything into the context window. On each user message:
+Managed sessions (`/sessions/{id}/chat`) use a local embedding model to retrieve relevant past turns instead of stuffing everything into context:
 
-1. The query is embedded (combined with recent context + summary for better matching)
-2. Top-k relevant past turns are retrieved from the session's vector store
-3. Retrieved context + recent turns + summary are sent to the model
-
-This keeps full conversation history available without token overflow. Configure via `LLM_EMBEDDING_MODEL` (general) or `LLM_EMBEDDING_MODEL_CODE` (code-specialized).
+1. Query embedded (combined with recent context + summary)
+2. Top-k relevant past turns retrieved from vector store
+3. Retrieved context + recent turns + summary sent to model
 
 **Vector store backends:**
-- **Qdrant (default)** — persistent, disk-based (`./qdrant_db/`), supports metadata filtering, scales to millions of vectors
-- **Simple (in-memory)** — no dependencies, lost on restart, good for testing
+- **Qdrant (default)** — persistent, disk-based (`./qdrant_db/`), metadata filtering, scales to millions
+- **Simple (in-memory)** — no deps, lost on restart, good for testing
 
 Switch via `LLM_VECTOR_BACKEND=qdrant|simple`.
 
-> **Note:** This is **conversation history RAG** (recalls what you discussed earlier). It is **not** Continue's `@codebase` — that feature indexes your **repository files** separately and requires Continue's own config (`context.providers.codebase`). They work together: `@codebase` brings in relevant code files; server RAG brings in relevant past conversation turns.
-
----
-
-## Agent Capabilities (Experimental)
-
-The server includes a built-in ReAct-style agent (`app/llm/agent_loop.py`) with these tools:
-
-| Tool | Description |
-|---|---|
-| `web_search` | DuckDuckGo HTML scrape (no API key) |
-| `code_exec` | Sandboxed Python execution |
-| `file_read` / `file_write` | Workspace file operations |
-| `shell` | Restricted command execution |
-
-Enable by adding `agent: true` to your chat request body, or use the `/v1/agent/chat` endpoint. The agent runs server-side with the same session memory and token budgeting.
+> This is **conversation history RAG** (recalls what you discussed). It is **not** Continue's `@codebase` — that indexes your **repository files** separately. They work together: `@codebase` = relevant code files; server RAG = relevant past conversation turns.
 
 ---
 
@@ -162,34 +125,11 @@ Enable by adding `agent: true` to your chat request body, or use the `/v1/agent/
 
 The launcher provides additional models for each tier.
 
-<details>
-<summary><strong>View full model catalog</strong></summary>
-
-### 4GB
-
-- **Qwen 2.5 3B Instruct** — Q4_K_M (~2.0 GB)
-- **Llama 3.2 3B Instruct** — Q4_K_M (~2.0 GB)
-- **Phi-3.5 Mini 3.8B** — Q4_K_M (~2.3 GB)
-
-### 6GB
-
-- **Qwen 2.5 7B** — Q3_K_M (~3.8 GB)
-- **Qwen 2.5 7B** — Q3_K_M (~3.8 GB)
-- **Llama 3.2 3B** — Q8_0 (~3.4 GB)
-
-### 8GB
-
-- **Llama 3.1 8B** — Q4_K_M (~4.9 GB)
-- **Qwen 2.5 7B** — Q4_K_M (~4.7 GB)
-- **Qwen 2.5 7B** — Q4_K_M (~4.7 GB)
-
-</details>
-
 ---
 
 ## Adaptive Runtime
 
-LocalAI automatically tries progressively safer configurations based on detected VRAM.
+Automatically tries safer configurations based on detected VRAM:
 
 | Tier | Configurations |
 |---|---|
@@ -197,9 +137,7 @@ LocalAI automatically tries progressively safer configurations based on detected
 | 6GB | `12K/256 → 8K/256 → 8K/128 → 4K/128` |
 | 8GB | `16K/256 → 12K/256 → 8K/256 → 8K/128 → 4K/128` |
 
-Format: `n_ctx / n_batch`. If a configuration fails to initialize, the next safer one is tried automatically. Whichever `n_ctx` actually loads becomes the token budget the session manager enforces per device.
-
-> `n_ctx` controls context/KV-cache capacity. `n_batch` primarily affects prompt-processing memory and performance.
+Format: `n_ctx / n_batch`. Failed configs fall back automatically. The `n_ctx` that loads becomes the token budget.
 
 ---
 
@@ -212,59 +150,16 @@ Format: `n_ctx / n_batch`. If a configuration fails to initialize, the next safe
 | Intel | Vulkan |
 | CPU fallback | CPU |
 
-`setup.sh` / `setup.bat` detect the backend and build `llama-cpp-python` accordingly.
-
-<details>
-<summary><strong>Linux prerequisites</strong></summary>
-
-### Arch / CachyOS
-
-```bash
-sudo pacman -S --needed \
-  cmake gcc vulkan-devel \
-  spirv-headers spirv-tools \
-  shaderc vulkan-icd-loader
-```
-
-### Ubuntu / Debian
-
-```bash
-sudo apt install \
-  build-essential cmake \
-  libvulkan-dev glslc \
-  spirv-headers spirv-tools \
-  vulkan-tools
-```
-
-A working GPU driver/Vulkan installation is also required.
-
-</details>
-
-<details>
-<summary><strong>Windows prerequisites</strong></summary>
-
-Install:
-
-- Python 3
-- CMake
-- Visual Studio Build Tools with C++
-- Git
-- GPU drivers
-- CUDA development tools for NVIDIA
-- Vulkan runtime/development tools for AMD/Intel
-
-</details>
+`setup.sh` / `setup.bat` detect and build accordingly.
 
 ---
 
-## Integrating with VS Code
+## Integrating with VS Code (Continue)
 
-### Option A: Continue Extension (Recommended)
+Continue manages its own history client-side, so it uses the raw `/v1/chat/completions` endpoint.
 
-Continue manages its own conversation history client-side, so it talks to the raw `/v1/chat/completions` endpoint, not `/sessions`.
-
-1. Install **Continue** from the VS Code Marketplace.
-2. Open the Continue sidebar → ⚙️ **Settings** → `~/.continue/config.yaml`.
+1. Install **Continue** from VS Code Marketplace
+2. Open Continue sidebar → ⚙️ Settings → `~/.continue/config.yaml`
 3. Paste:
 
 ```yaml
@@ -273,154 +168,97 @@ version: 1.0.0
 schema: v1
 
 models:
-  - name: Local Qwen 2.5 Coder
+  - name: local-qwen-coder
     provider: openai
-    model: Qwen2.5-Coder-7B-Instruct-Q4_K_M
-    apiBase: http://<server-lan-ip>:8000/v1
+    model: qwen2.5-7b-instruct-q4_k_m
+    apiBase: http://127.0.0.1:8000/v1
     apiKey: dummy
     requestOptions:
       headers:
         X-API-Key: "<your LLM_API_KEY value>"
+    roles: [chat, edit]
+    capabilities:
+      - tool_use
     defaultCompletionOptions:
-      contextLength: 15000   # a bit under your actual n_ctx — leaves room for the reply
+      contextLength: 15000
       maxTokens: 1024
+
+  - name: CodeBERT Embeddings
+    provider: openai
+    model: "microsoft/codebert-base"
+    apiBase: "http://127.0.0.1:8000/v1"
+    apiKey: "dummy"
     roles:
-      - chat
-      - edit
-      - autocomplete
+      - embed
+
+context:
+  - provider: codebase
 ```
 
-- `<server-lan-ip>` — the server machine's LAN IP if connecting from another device, or `127.0.0.1` if VS Code is on the same machine.
-- `X-API-Key` is required now — without it every request gets a 401, including from Continue.
-- `contextLength` should sit below whichever `n_ctx` your adaptive runtime actually landed on (check the server's startup log), not equal to it.
-
-### Option B: VS Code Native / GitHub Copilot (BYOK)
-
-1. `Ctrl+Shift+P` (`Cmd+Shift+P` on Mac) → **`Chat: Manage Language Models`**.
-2. **Add Models** → **Custom Endpoint** (or **OpenAI**).
-3. Fill in:
-   - **Group / Provider Name**: `LocalAI`
-   - **API Base URL**: `http://<server-lan-ip>:8000/v1`
-   - **API Key**: your `LLM_API_KEY` value (BYOK flows generally only support a bearer-style key field, not a custom header — if the field is sent as `Authorization: Bearer <value>` rather than `X-API-Key`, it won't currently authenticate against this server; Option A is the more reliable path until that's reconciled)
-4. Select `LocalAI` from the model dropdown.
-
-Use `GET /v1/models` (with the `X-API-Key` header) if the client needs an exact model identifier.
+- `<server-lan-ip>` — server machine's LAN IP (or `127.0.0.1` if local)
+- `X-API-Key` required — without it every request gets 401
+- `contextLength` should be below actual `n_ctx` (check server startup log)
 
 ---
 
 ## Project Structure
 
-```text
+```
 llm-server/
-├── run.py                          # entrypoint: python run.py (or ./start.sh)
-├── setup.sh / setup.bat            # first-time install (venv, deps, CUDA/Vulkan build, embedding model selection)
-├── start.sh / start.bat            # checks LLM_API_KEY, then runs run.py
+├── run.py                          # entrypoint
+├── setup.sh / setup.bat            # first-time install (venv, deps, CUDA/Vulkan, embedding model)
+├── start.sh / start.bat            # checks LLM_API_KEY, runs run.py
 ├── requirements.txt
 ├── models/                         # your .gguf goes here
-├── qdrant_db/                      # vector store data (created at runtime, in .gitignore)
-├── .env                            # created by setup.sh/.bat, holds embedding model choice
+├── qdrant_db/                      # vector store data (runtime, in .gitignore)
+├── .env                            # created by setup, holds embedding model choice
 ├── docs/
-│   └── CLIENT_SECURITY.md          # how clients must store api_key/session_id
+│   └── CLIENT_SECURITY.md          # how clients store api_key/session_id
 └── app/
-    ├── config.py                   # env vars -> Settings (single source of truth, loads .env)
-    ├── auth.py                     # API key check — dependency + global middleware
-    ├── tokenizer.py                # exact token counts via the model's own vocab
-    ├── cleanup.py                  # background sweep for expired sessions
-    ├── main.py                     # composition root — wires everything together
-    │
+    ├── config.py                   # env vars -> Settings (loads .env)
+    ├── auth.py                     # API key middleware
+    ├── tokenizer.py                # exact token counts via model vocab
+    ├── cleanup.py                  # background TTL sweep
+    ├── main.py                     # composition root
     ├── models/
-    │   └── schemas.py              # request/response Pydantic models
-    │
+    │   └── schemas.py              # Pydantic request/response models
     ├── sessions/
     │   ├── session.py              # Session entity
-    │   ├── eviction.py             # Drop / Summarize eviction strategies
-    │   ├── repository.py           # persistence interface + JSON implementation
+    │   ├── eviction.py             # Drop / Summarize strategies
+    │   ├── repository.py           # persistence interface + JSON impl
     │   └── store.py                # coordinates sessions, budget, eviction, TTL
-    │
     ├── llm/
     │   ├── gpu_detect.py           # hardware detection
     │   ├── catalog.py              # model catalog + download
-    │   ├── server_launcher.py      # adaptive n_ctx/n_batch loop -> llama_cpp.server app
-    │   ├── completion_client.py    # calls the model (loopback HTTP today)
-    │   ├── agent_loop.py           # ReAct-style agent loop with tool calling
-    │   ├── tools.py                # built-in tools (web search, code exec, etc.)
+    │   ├── server_launcher.py      # adaptive n_ctx/n_batch -> llama_cpp.server
+    │   ├── completion_client.py    # calls model (loopback HTTP)
+    │   ├── agent_loop.py           # ReAct agent with tools
+    │   ├── tools.py                # built-in tools
     │   └── watchdog.py             # GPU/health monitoring
-    │
     └── routes/
-        ├── sessions_router.py      # HTTP layer for /sessions/*
-        ├── proxy_router.py         # OpenAI-compatible /v1/* proxy + auth
-        └── debug_router.py         # debug endpoints for vector store (/debug/vector/*)
+        ├── sessions_router.py      # /sessions/*
+        ├── proxy_router.py         # /v1/* proxy + auth
+        └── debug_router.py         # /debug/vector/*
 ```
-
-`models/`, `venv/`, and `llama.cpp/` are created automatically if missing.
 
 ---
 
-## Environment Variables
+## Troubleshooting
 
-| Variable | Default | Purpose |
-|---|---|---|
-| `LLM_API_KEY` | *(required)* | Shared secret; every request needs matching `X-API-Key` header |
-| `LLM_HOST` | `0.0.0.0` | Bind address |
-| `LLM_PORT` | `8000` | Bind port |
-| `LLM_MODELS_DIR` | `models` | Where `.gguf` files are looked for/downloaded to |
-| `LLM_SESSIONS_FILE` | `sessions.json` | Persisted session store |
-| `LLM_RESERVE_FOR_RESPONSE` | `768` | Tokens always kept free for the model's reply |
-| `LLM_SESSION_TTL_DAYS` | `30` | Sessions untouched this long are purged |
-| `LLM_CLEANUP_INTERVAL_SECONDS` | `3600` | How often the TTL sweep runs |
-| `LLM_EMBEDDING_MODEL` | `BAAI/bge-small-en-v1.5` | General-purpose embedding model (CPU-only) |
-| `LLM_EMBEDDING_MODEL_CODE` | `microsoft/codebert-base` | Code-specialized embedding model for conversation RAG (default, CPU-only) |
-| `LLM_VECTOR_BACKEND` | `qdrant` | Vector store: `qdrant` (persistent) or `simple` (in-memory) |
-| `LLM_VECTOR_DB_PATH` | `./qdrant_db` | Path for Qdrant data |
-| `LLM_VECTOR_COLLECTION` | `conversations` | Qdrant collection name |
-| `LLM_ENABLE_DEBUG` | `false` | Enable `/debug/vector/*` endpoints |
-
-All variables can also be set in a `.env` file at the project root (created by `setup.sh` / `setup.bat`).
-
-<details>
-<summary><strong>Troubleshooting</strong></summary>
-
-### Vulkan build fails
-
-Make sure the Vulkan development packages, SPIR-V headers, and shader compiler are installed.
-
-### Build uses too much RAM
-
-Limit compilation parallelism:
-
-```bash
-export CMAKE_BUILD_PARALLEL_LEVEL=2
-```
-
-Windows:
-
-```cmd
-set CMAKE_BUILD_PARALLEL_LEVEL=2
-```
-
-### GPU is not detected
-
-Hardware detection lives in `app/llm/gpu_detect.py` — it falls back to a 4GB CPU-safe tier if nothing is recognized.
-
-### Model initialization fails
-
-The launcher automatically tries smaller context/batch configurations (`app/llm/server_launcher.py`). If all configurations fail, check available VRAM, system RAM, drivers, and backend installation.
-
-### 401 Unauthorized on every request
-
-`LLM_API_KEY` isn't set, or the client isn't sending a matching `X-API-Key` header. The server refuses to start at all without `LLM_API_KEY` set — see `app/config.py`.
-
-### A client's context keeps overflowing / errors out
-
-If it's talking to `/v1/chat/completions` directly (e.g. Continue), it's managing its own history and needs its `contextLength` set below the server's actual `n_ctx` — see the Continue config above. If it's talking to `/sessions/{id}/chat`, the server already manages this automatically; check `app/sessions/eviction.py` if it's still misbehaving.
-
-</details>
+| Issue | Fix |
+|---|---|
+| Vulkan build fails | Install Vulkan dev packages, SPIR-V headers, shader compiler |
+| Build uses too much RAM | `export CMAKE_BUILD_PARALLEL_LEVEL=2` (or `set` on Windows) |
+| GPU not detected | Falls back to 4GB CPU-safe tier; check `app/llm/gpu_detect.py` |
+| Model init fails | Launcher tries smaller configs automatically; check VRAM, RAM, drivers |
+| 401 on every request | `LLM_API_KEY` not set, or client not sending `X-API-Key` header |
+| Context overflow | For `/v1/chat/completions`: set `contextLength` below server's `n_ctx`. For `/sessions`: check `app/sessions/eviction.py` |
 
 ---
 
 ## Architecture
 
-```text
+```
 VS Code / Phone / Laptop / Other Client
                 │
       X-API-Key header required
@@ -443,6 +281,8 @@ VS Code / Phone / Laptop / Other Client
                 ▼
             GGUF Model
 ```
+
+---
 
 ## License
 
