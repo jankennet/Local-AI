@@ -16,6 +16,10 @@ from ..models.schemas import (
 from ..sessions.store import SessionStore
 from ..llm.completion_client import CompletionClient
 from ..llm.agent_loop import run_agent_turn
+from ..metrics import (
+    record_session_created, record_session_deleted, record_session_expired,
+    set_session_tokens, remove_session_metrics,
+)
 
 
 def build_sessions_router(
@@ -30,6 +34,8 @@ def build_sessions_router(
     @router.post("/sessions", response_model=NewSessionResponse)
     def create_session(req: NewSessionRequest):
         s = store.create_session(req.device_name, req.system_prompt)
+        record_session_created()
+        set_session_tokens(s.session_id, 0, store.budget)
         return NewSessionResponse(session_id=s.session_id)
 
     @router.get("/sessions", response_model=list[SessionInfo])
@@ -45,6 +51,8 @@ def build_sessions_router(
     @router.delete("/sessions/{session_id}")
     def delete_session(session_id: str):
         store.delete(session_id)
+        record_session_deleted()
+        remove_session_metrics(session_id)
         return {"deleted": session_id}
 
     @router.post("/sessions/{session_id}/chat", response_model=ChatResponse)
@@ -66,6 +74,9 @@ def build_sessions_router(
             tool_timeout=tool_timeout_seconds,
             max_retries=tool_max_retries,
         )
+
+        # Update session token metrics
+        set_session_tokens(session_id, store.tokens_used(session_id), store.budget)
 
         return ChatResponse(
             session_id=session_id,

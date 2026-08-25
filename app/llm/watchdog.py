@@ -16,6 +16,7 @@ freeze the rest of the app — session listing, etc. — while it's underway.
 import asyncio
 
 from .server_launcher import launch_llama_server, relaunch_with_config
+from ..metrics import record_llama_restart, update_llama_server_config
 
 CHECK_INTERVAL_SECONDS = 15
 
@@ -38,6 +39,7 @@ async def watch_llama_server(
             )
             if result is not None:
                 process_holder["process"], _base_url = result
+                record_llama_restart("crash_recovery_same_config")
                 print("[watchdog] relaunch succeeded")
                 continue
 
@@ -50,6 +52,11 @@ async def watch_llama_server(
                 print(f"[watchdog] WARNING: recovered at a smaller n_ctx={config['n_ctx']} "
                       f"(was {config_holder['config']['n_ctx']}) — existing sessions' token "
                       f"budgets are now stale. Restart the whole app for full consistency.")
+                record_llama_restart("config_downgrade")
+            else:
+                record_llama_restart("crash_recovery_new_config")
             config_holder["config"] = config
+            update_llama_server_config(config["n_ctx"], config["n_batch"])
         except RuntimeError as error:
             print(f"[watchdog] recovery failed entirely: {error} — will retry on next check")
+            record_llama_restart("recovery_failed")

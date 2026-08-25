@@ -95,9 +95,11 @@ DELETE /debug/vector/clear           -> clear all vectors
 GET    /debug/sessions/{id}/vectors  -> inspect session's vector state
 ```
 
-### Health endpoint
+### Monitoring endpoints
 ```text
 GET    /health    -> server status, llama-server health, model info, active sessions
+GET    /stats     -> human-readable summary (active sessions, tokens, tool calls, HTTP stats)
+GET    /metrics   -> Prometheus scrape endpoint (raw metrics for Grafana/Prometheus)
 ```
 
 ---

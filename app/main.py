@@ -21,7 +21,7 @@ import logging
 import subprocess
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 
 from .config import settings
 from .cleanup import periodic_cleanup
@@ -40,6 +40,12 @@ from .routes.sessions_router import build_sessions_router
 from .routes.proxy_router import build_proxy_router
 from .routes.debug_router import build_debug_router
 from .llm.watchdog import watch_llama_server
+from .metrics import (
+    init_server_info, update_llama_server_config, set_llama_health,
+    set_active_sessions, record_http_request, record_session_created,
+    record_session_deleted, record_session_expired, record_llama_restart,
+)
+from prometheus_client import make_asgi_app
 
 logging.basicConfig(
     level=logging.INFO,
@@ -95,7 +101,7 @@ def create_app() -> FastAPI:
         embedding_service=embedding_service,
         vector_store_factory=vector_store_factory,
     )
-    completion_client = LoopbackCompletionClient(base_url)
+    completion_client = LoopbackCompletionClient(base_url, model_path)
 
     # Mutable holders — the watchdog replaces these in place if it has to
     # relaunch the process, so completion_client (which already points at
@@ -129,6 +135,76 @@ def create_app() -> FastAPI:
         settings.vector_backend, settings.vector_db_path, settings.vector_collection,
     ))
 
+    # Prometheus metrics endpoint
+    # Use a route instead of mount to avoid trailing slash issues
+    from starlette.responses import Response
+    from prometheus_client import generate_latest, CONTENT_TYPE_LATEST, REGISTRY
+
+    @app.get("/metrics", include_in_schema=False)
+    async def metrics():
+        return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+    @app.get("/stats", include_in_schema=False)
+    async def stats():
+        """Human-readable key metrics summary."""
+        # Query Prometheus registry directly for current values
+        def get_metric(name: str, labels: dict = None):
+            labels = labels or {}
+            for metric in REGISTRY.collect():
+                for sample in metric.samples:
+                    if sample.name == name and sample.labels == labels:
+                        return sample.value
+            return None
+
+        def get_metric_by_prefix(prefix: str):
+            results = {}
+            for metric in REGISTRY.collect():
+                for sample in metric.samples:
+                    if sample.name.startswith(prefix):
+                        key = sample.name
+                        if sample.labels:
+                            key += "{" + ",".join(f'{k}="{v}"' for k, v in sample.labels.items()) + "}"
+                        results[key] = sample.value
+            return results
+
+        return {
+            "server": {
+                "status": "healthy" if get_metric("llm_llama_server_health") == 1 else "degraded",
+                "model": model_path,
+                "n_ctx": int(get_metric("llm_llama_server_n_ctx") or 0),
+                "n_batch": int(get_metric("llm_llama_server_n_batch") or 0),
+            },
+            "sessions": {
+                "active": int(get_metric("llm_active_sessions") or 0),
+                "created_total": int(get_metric("llm_sessions_created_total") or 0),
+                "expired_total": int(get_metric("llm_sessions_expired_total") or 0),
+            },
+            "http": {
+                "requests_total": int(sum(v for k, v in get_metric_by_prefix("llm_http_requests_total").items())),
+            },
+            "tools": get_metric_by_prefix("llm_tool_calls_total"),
+            "tokens": {
+                "prompt_total": int(sum(v for k, v in get_metric_by_prefix("llm_completion_tokens_total").items() if 'type="prompt"' in k)),
+                "completion_total": int(sum(v for k, v in get_metric_by_prefix("llm_completion_tokens_total").items() if 'type="completion"' in k)),
+            },
+        }
+
+    # Initialize server info metrics
+    init_server_info(model_path, selected_config["n_ctx"], selected_config["n_batch"],
+                     "q8_0" if selected_config["kv_quant"] else "f16")
+    update_llama_server_config(selected_config["n_ctx"], selected_config["n_batch"])
+
+    @app.middleware("http")
+    async def metrics_middleware(request: Request, call_next):
+        import time
+        start = time.time()
+        response = await call_next(request)
+        duration = time.time() - start
+        record_http_request(
+            request.method, request.url.path, response.status_code, duration
+        )
+        return response
+
     @app.get("/health")
     async def health():
         llama_healthy = False
@@ -138,6 +214,9 @@ def create_app() -> FastAPI:
             llama_healthy = resp.status_code == 200
         except Exception:
             pass
+
+        set_llama_health(llama_healthy)
+        set_active_sessions(len(store.list_sessions()))
 
         return {
             "status": "healthy" if llama_healthy else "degraded",

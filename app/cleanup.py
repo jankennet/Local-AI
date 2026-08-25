@@ -9,6 +9,7 @@ main.py's lifespan — nothing else needs to know this exists.
 import asyncio
 
 from .sessions.store import SessionStore
+from .metrics import record_session_expired
 
 
 async def periodic_cleanup(store: SessionStore, interval_seconds: int):
@@ -16,4 +17,6 @@ async def periodic_cleanup(store: SessionStore, interval_seconds: int):
         removed = store.purge_expired()
         if removed:
             print(f"[cleanup] purged {removed} expired session(s)")
+            for _ in range(removed):
+                record_session_expired()
         await asyncio.sleep(interval_seconds)

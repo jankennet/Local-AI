@@ -12,11 +12,15 @@ Assumes the caller already added the user's message to the session
 import asyncio
 import json
 import logging
+import time
 from typing import Optional
 
 from ..sessions.store import SessionStore
 from .completion_client import CompletionClient
 from .tools import TOOLS
+from ..metrics import (
+    record_agent_round, record_agent_turn, record_tool_call,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +51,7 @@ async def run_agent_turn(
     tool_schemas = [t["schema"] for t in tools.values()]
 
     for round_num in range(MAX_TOOL_ROUNDS):
+        record_agent_round(session_id)
         messages = store.build_messages(session_id, use_rag=rag_query is not None, query=rag_query)
 
         message = completion_client.complete_with_tools(
@@ -57,9 +62,11 @@ async def run_agent_turn(
         if not tool_calls:
             reply = message.get("content") or ""
             store.add_turn(session_id, "assistant", reply)
+            record_agent_turn(session_id, "assistant")
             return reply
 
         store.add_turn(session_id, "assistant", message.get("content") or "", tool_calls=tool_calls)
+        record_agent_turn(session_id, "assistant")
 
         results = await _execute_tools_parallel(
             tools, tool_calls, tool_timeout, max_retries
@@ -67,6 +74,7 @@ async def run_agent_turn(
 
         for call, result in zip(tool_calls, results):
             store.add_turn(session_id, "tool", result, tool_call_id=call["id"])
+            record_agent_turn(session_id, "tool")
 
     return "Stopped after too many tool calls in a row — try breaking the task into smaller steps."
 
@@ -79,21 +87,31 @@ async def _execute_tools_parallel(
 ) -> list[str]:
     """Execute multiple tool calls in parallel with retry logic."""
     async def execute_with_retry(call: dict) -> str:
+        name = call["function"]["name"]
+        start = time.time()
+        retries = 0
         for attempt in range(max_retries + 1):
             try:
-                return await asyncio.wait_for(
+                result = await asyncio.wait_for(
                     asyncio.to_thread(_execute_tool, tools, call),
                     timeout=timeout,
                 )
+                record_tool_call(name, time.time() - start, True, retries)
+                return result
             except asyncio.TimeoutError:
-                logger.warning(f"Tool {call['function']['name']} timed out (attempt {attempt + 1}/{max_retries + 1})")
+                retries += 1
+                logger.warning(f"Tool {name} timed out (attempt {attempt + 1}/{max_retries + 1})")
                 if attempt == max_retries:
-                    return f"Error: tool '{call['function']['name']}' timed out after {timeout}s"
+                    record_tool_call(name, time.time() - start, False, retries)
+                    return f"Error: tool '{name}' timed out after {timeout}s"
             except Exception as e:
-                logger.warning(f"Tool {call['function']['name']} failed (attempt {attempt + 1}/{max_retries + 1}): {e}")
+                retries += 1
+                logger.warning(f"Tool {name} failed (attempt {attempt + 1}/{max_retries + 1}): {e}")
                 if attempt == max_retries:
-                    return f"Error running {call['function']['name']}: {type(e).__name__}: {e}"
-        return f"Error: tool '{call['function']['name']}' failed after {max_retries + 1} attempts"
+                    record_tool_call(name, time.time() - start, False, retries)
+                    return f"Error running {name}: {type(e).__name__}: {e}"
+        record_tool_call(name, time.time() - start, False, retries)
+        return f"Error: tool '{name}' failed after {max_retries + 1} attempts"
 
     tasks = [execute_with_retry(call) for call in tool_calls]
     return await asyncio.gather(*tasks, return_exceptions=False)
