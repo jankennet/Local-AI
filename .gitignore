@@ -20,6 +20,7 @@ qdrant_db/
 *.swp
 *.swo
 *~
+.continue/*
 
 # Dev stuff
 .env/

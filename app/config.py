@@ -37,6 +37,8 @@ class Settings:
     vector_backend: str = "qdrant"
     vector_db_path: str = "./qdrant_db"
     vector_collection: str = "conversations"
+    tool_timeout_seconds: float = 30.0
+    tool_max_retries: int = 2
 
 
 def load_settings() -> Settings:
@@ -65,6 +67,8 @@ def load_settings() -> Settings:
         vector_backend=os.environ.get("LLM_VECTOR_BACKEND", "qdrant"),
         vector_db_path=os.environ.get("LLM_VECTOR_DB_PATH", "./qdrant_db"),
         vector_collection=os.environ.get("LLM_VECTOR_COLLECTION", "conversations"),
+        tool_timeout_seconds=float(os.environ.get("LLM_TOOL_TIMEOUT_SECONDS", "30.0")),
+        tool_max_retries=int(os.environ.get("LLM_TOOL_MAX_RETRIES", "2")),
     )
 
 

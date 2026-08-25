@@ -95,6 +95,11 @@ DELETE /debug/vector/clear           -> clear all vectors
 GET    /debug/sessions/{id}/vectors  -> inspect session's vector state
 ```
 
+### Health endpoint
+```text
+GET    /health    -> server status, llama-server health, model info, active sessions
+```
+
 ---
 
 ## Semantic Context Retrieval (RAG)
@@ -151,6 +156,28 @@ Format: `n_ctx / n_batch`. Failed configs fall back automatically. The `n_ctx` t
 | CPU fallback | CPU |
 
 `setup.sh` / `setup.bat` detect and build accordingly.
+
+---
+
+## Tool Calling (ReAct Agent)
+
+Managed sessions (`/sessions/{id}/chat`) include a ReAct agent loop with
+built-in tools (`read_file`, `write_file`, `list_dir`, `run_bash`).
+
+Reliability improvements:
+- **Parallel tool calls** — multiple tool invocations in one round execute concurrently
+- **Schema validation** — arguments validated against OpenAI function schemas before execution
+- **Automatic retries** — failed tools retry up to `LLM_TOOL_MAX_RETRIES` times (default 2)
+- **Configurable timeouts** — per-tool timeout via `LLM_TOOL_TIMEOUT_SECONDS` (default 30s)
+- **Structured logging** — every tool call logs duration, args, and success/failure
+
+Environment variables:
+| Variable | Default | Description |
+|---|---:|---|
+| `LLM_TOOL_TIMEOUT_SECONDS` | 30.0 | Max seconds per tool call |
+| `LLM_TOOL_MAX_RETRIES` | 2 | Retry attempts for failed tools |
+| `LLM_ALLOW_SHELL` | 0 | Set to `1` to enable `run_bash` tool |
+| `LLM_WORKSPACE_DIR` | `workspace` | Root directory for file tools |
 
 ---
 

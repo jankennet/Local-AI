@@ -39,6 +39,7 @@ from .llm.tools import TOOLS
 from .routes.sessions_router import build_sessions_router
 from .routes.proxy_router import build_proxy_router
 from .routes.debug_router import build_debug_router
+from .llm.watchdog import watch_llama_server
 
 logging.basicConfig(
     level=logging.INFO,
@@ -115,12 +116,39 @@ def create_app() -> FastAPI:
         terminate_process(process_holder["process"])  # stop the native llama-server subprocess too
 
     app = FastAPI(lifespan=lifespan)
-    app.include_router(build_sessions_router(store, completion_client, TOOLS))
+    app.include_router(build_sessions_router(
+        store,
+        completion_client,
+        TOOLS,
+        tool_timeout_seconds=settings.tool_timeout_seconds,
+        tool_max_retries=settings.tool_max_retries,
+    ))
     app.include_router(build_proxy_router(base_url))
     app.include_router(build_debug_router(
         store, embedding_service,
         settings.vector_backend, settings.vector_db_path, settings.vector_collection,
     ))
+
+    @app.get("/health")
+    async def health():
+        llama_healthy = False
+        try:
+            import requests
+            resp = requests.get(f"{base_url}/health", timeout=2)
+            llama_healthy = resp.status_code == 200
+        except Exception:
+            pass
+
+        return {
+            "status": "healthy" if llama_healthy else "degraded",
+            "llama_server": "healthy" if llama_healthy else "unhealthy",
+            "model": model_path,
+            "n_ctx": selected_config["n_ctx"],
+            "n_batch": selected_config["n_batch"],
+            "kv_cache": "q8_0" if selected_config["kv_quant"] else "f16",
+            "active_sessions": len(store.list_sessions()),
+        }
+
     return app
 
 

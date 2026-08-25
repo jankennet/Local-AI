@@ -15,8 +15,12 @@ Safety, not optional:
     bloat sessions.json before eviction ever gets a chance to run.
 """
 
+import logging
 import os
 import subprocess
+import time
+
+logger = logging.getLogger(__name__)
 
 WORKSPACE_DIR = os.path.abspath(os.environ.get("LLM_WORKSPACE_DIR", "workspace"))
 os.makedirs(WORKSPACE_DIR, exist_ok=True)
@@ -37,40 +41,80 @@ def _truncate(text: str) -> str:
     return text
 
 
+def _log_tool_call(name: str, args: dict, start_time: float, success: bool, error: str = None) -> None:
+    duration = time.time() - start_time
+    if success:
+        logger.info(f"tool_call: {name} args={args} duration_ms={int(duration * 1000)}")
+    else:
+        logger.warning(f"tool_call_failed: {name} args={args} duration_ms={int(duration * 1000)} error={error}")
+
+
 def read_file(path: str) -> str:
-    full = _resolve(path)
-    if not os.path.isfile(full):
-        return f"Error: no such file '{path}'"
-    with open(full, "r", errors="replace") as f:
-        return _truncate(f.read())
+    start = time.time()
+    try:
+        full = _resolve(path)
+        if not os.path.isfile(full):
+            _log_tool_call("read_file", {"path": path}, start, False, "file not found")
+            return f"Error: no such file '{path}'"
+        with open(full, "r", errors="replace") as f:
+            content = _truncate(f.read())
+        _log_tool_call("read_file", {"path": path}, start, True)
+        return content
+    except Exception as e:
+        _log_tool_call("read_file", {"path": path}, start, False, str(e))
+        return f"Error reading file: {type(e).__name__}: {e}"
 
 
 def write_file(path: str, content: str) -> str:
-    full = _resolve(path)
-    os.makedirs(os.path.dirname(full), exist_ok=True)
-    with open(full, "w") as f:
-        f.write(content)
-    return f"Wrote {len(content)} chars to {path}"
+    start = time.time()
+    try:
+        full = _resolve(path)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, "w") as f:
+            f.write(content)
+        result = f"Wrote {len(content)} chars to {path}"
+        _log_tool_call("write_file", {"path": path, "chars": len(content)}, start, True)
+        return result
+    except Exception as e:
+        _log_tool_call("write_file", {"path": path, "chars": len(content)}, start, False, str(e))
+        return f"Error writing file: {type(e).__name__}: {e}"
 
 
 def list_dir(path: str = ".") -> str:
-    full = _resolve(path)
-    if not os.path.isdir(full):
-        return f"Error: no such directory '{path}'"
-    return "\n".join(sorted(os.listdir(full))) or "(empty)"
+    start = time.time()
+    try:
+        full = _resolve(path)
+        if not os.path.isdir(full):
+            _log_tool_call("list_dir", {"path": path}, start, False, "directory not found")
+            return f"Error: no such directory '{path}'"
+        result = "\n".join(sorted(os.listdir(full))) or "(empty)"
+        _log_tool_call("list_dir", {"path": path}, start, True)
+        return result
+    except Exception as e:
+        _log_tool_call("list_dir", {"path": path}, start, False, str(e))
+        return f"Error listing directory: {type(e).__name__}: {e}"
 
 
 def run_bash(command: str) -> str:
+    start = time.time()
     if os.environ.get("LLM_ALLOW_SHELL") != "1":
+        _log_tool_call("run_bash", {"command": command}, start, False, "shell disabled")
         return "Error: shell execution is disabled (set LLM_ALLOW_SHELL=1 to enable)"
     try:
         result = subprocess.run(
             command, shell=True, cwd=WORKSPACE_DIR,
             capture_output=True, text=True, timeout=30,
         )
-        return _truncate(result.stdout + result.stderr) or "(no output)"
+        output = _truncate(result.stdout + result.stderr) or "(no output)"
+        success = result.returncode == 0
+        _log_tool_call("run_bash", {"command": command}, start, success, None if success else f"exit_code={result.returncode}")
+        return output
     except subprocess.TimeoutExpired:
+        _log_tool_call("run_bash", {"command": command}, start, False, "timeout")
         return "Error: command timed out after 30s"
+    except Exception as e:
+        _log_tool_call("run_bash", {"command": command}, start, False, str(e))
+        return f"Error running command: {type(e).__name__}: {e}"
 
 
 TOOLS = {
