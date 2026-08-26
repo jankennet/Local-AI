@@ -86,6 +86,56 @@ def rerank(query: str, candidates: List[Tuple[float, str, dict]], top_k: int) ->
     return reranked[:top_k]
 
 
+def deduplicate_results(
+    results: List[Tuple[float, str, dict]],
+    threshold: float = 0.85,
+    embedding_service: Optional["EmbeddingService"] = None,
+) -> List[Tuple[float, str, dict]]:
+    """
+    Remove semantically duplicate results using embedding similarity.
+    
+    Args:
+        results: List of (score, text, metadata) tuples
+        threshold: Cosine similarity threshold above which results are considered duplicates
+        embedding_service: EmbeddingService instance for computing embeddings
+    
+    Returns:
+        Deduplicated list preserving highest-scored result from each duplicate group
+    """
+    if not results or len(results) <= 1 or embedding_service is None:
+        return results
+    
+    texts = [text for _, text, _ in results]
+    embeddings = embedding_service.embed(texts)
+    
+    # Normalize embeddings for cosine similarity
+    norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+    norms[norms == 0] = 1
+    normalized = embeddings / norms
+    
+    # Compute pairwise similarity matrix
+    sim_matrix = np.dot(normalized, normalized.T)
+    
+    # Keep track of which results to keep
+    keep = [True] * len(results)
+    
+    for i in range(len(results)):
+        if not keep[i]:
+            continue
+        for j in range(i + 1, len(results)):
+            if not keep[j]:
+                continue
+            if sim_matrix[i, j] >= threshold:
+                # Keep the one with higher original score, mark other as duplicate
+                if results[i][0] >= results[j][0]:
+                    keep[j] = False
+                else:
+                    keep[i] = False
+                    break  # i is now marked for removal, no need to check further
+    
+    return [results[i] for i in range(len(results)) if keep[i]]
+
+
 class EmbeddingService:
     """Thread-safe local embeddings. Loads model once (lazy) per model name."""
 

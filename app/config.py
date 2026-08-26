@@ -61,6 +61,12 @@ class Settings:
     budget_tools_pct: float = 0.10           # 10% for tool results
     tool_timeout_seconds: float = 30.0
     tool_max_retries: int = 2
+    # Adaptive temperature settings
+    tool_call_temperature: float = 0.1      # Low temp for deterministic tool calling
+    final_response_temperature: float = 0.7  # Higher temp for natural final response
+    # Semantic deduplication settings
+    rag_dedup_threshold: float = 0.85   # Cosine similarity threshold for deduplication
+    rag_dedup_enabled: bool = True      # Enable/disable semantic deduplication
 
 
 def load_settings() -> Settings:
@@ -105,6 +111,10 @@ def load_settings() -> Settings:
         budget_tools_pct=float(os.environ.get("LLM_BUDGET_TOOLS_PCT", "0.10")),
         tool_timeout_seconds=float(os.environ.get("LLM_TOOL_TIMEOUT_SECONDS", "30.0")),
         tool_max_retries=int(os.environ.get("LLM_TOOL_MAX_RETRIES", "2")),
+        tool_call_temperature=float(os.environ.get("LLM_TOOL_CALL_TEMPERATURE", "0.1")),
+        final_response_temperature=float(os.environ.get("LLM_FINAL_RESPONSE_TEMPERATURE", "0.7")),
+        rag_dedup_threshold=float(os.environ.get("LLM_RAG_DEDUP_THRESHOLD", "0.85")),
+        rag_dedup_enabled=os.environ.get("LLM_RAG_DEDUP_ENABLED", "true").lower() == "true",
     )
 
 

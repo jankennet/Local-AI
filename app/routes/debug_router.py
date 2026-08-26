@@ -144,4 +144,23 @@ def build_debug_router(
             "history": s.history,
         }
 
+    @router.get("/debug/sessions/{session_id}/tokens")
+    def session_tokens(session_id: str):
+        _check_enabled()
+        s = store.get(session_id)
+        if not s:
+            raise HTTPException(status_code=404, detail="Session not found")
+        
+        # Use the store's internal token counter
+        breakdown = s.get_token_breakdown(store._counter)
+        
+        return {
+            "session_id": session_id,
+            "total_tokens": breakdown["total"],
+            "breakdown": breakdown,
+            "budget": store.budget,
+            "available": max(0, store.budget - breakdown["total"]),
+            "utilization_pct": round(breakdown["total"] / store.budget * 100, 1) if store.budget > 0 else 0,
+        }
+
     return router

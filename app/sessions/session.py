@@ -10,7 +10,7 @@ from dataclasses import dataclass, field, asdict, fields
 import time
 from typing import List, Optional, Tuple, Callable
 
-from ..embeddings import EmbeddingService, VectorStore, rerank
+from ..embeddings import EmbeddingService, VectorStore, rerank, deduplicate_results
 from ..config import settings
 from ..tokenizer import TokenCounter
 
@@ -57,7 +57,7 @@ class Session:
         if self._vector_store and content.strip():
             self._vector_store.add(content, {"turn_index": turn_index, "role": role})
 
-    def retrieve_relevant(self, query: str, top_k: int = None, initial_k: int = None, use_reranker: bool = None) -> List[Tuple[float, str, dict]]:
+    def retrieve_relevant(self, query: str, top_k: int = None, initial_k: int = None, use_reranker: bool = None, use_dedup: bool = None) -> List[Tuple[float, str, dict]]:
         if not self._vector_store:
             return []
         
@@ -68,15 +68,27 @@ class Session:
             initial_k = settings.rag_initial_k
         if use_reranker is None:
             use_reranker = settings.reranker_enabled
+        if use_dedup is None:
+            use_dedup = settings.rag_dedup_enabled
         
         # Stage 1: Broad vector search
         candidates = self._vector_store.search(query, initial_k)
         
         # Stage 2: Rerank with cross-encoder
         if use_reranker and len(candidates) > top_k:
-            return rerank(query, candidates, top_k)
+            candidates = rerank(query, candidates, top_k)
+        else:
+            candidates = candidates[:top_k]
         
-        return candidates[:top_k]
+        # Stage 3: Semantic deduplication
+        if use_dedup and len(candidates) > 1 and self._embedding_service:
+            candidates = deduplicate_results(
+                candidates,
+                threshold=settings.rag_dedup_threshold,
+                embedding_service=self._embedding_service,
+            )
+        
+        return candidates
 
     def _compress_turn(self, text: str, max_tokens: int, counter: TokenCounter) -> str:
         """Compress a single turn to fit within max_tokens by truncating."""
@@ -172,7 +184,7 @@ class Session:
                     (m.get("content") or "") for m in self.history[-3:] if m.get("content")
                 )
                 retrieval_query = f"{query} {self.summary} {recent_context}".strip()
-                retrieved = self.retrieve_relevant(retrieval_query, rag_top_k, rag_initial_k, use_reranker)
+                retrieved = self.retrieve_relevant(retrieval_query, rag_top_k, rag_initial_k, use_reranker, True)
                 if retrieved:
                     context_lines = [f"[Relevant context]: {text}" for _, text, _ in retrieved]
                     msgs.append({"role": "system", "content": "\n".join(context_lines)})
@@ -206,7 +218,7 @@ class Session:
                 (m.get("content") or "") for m in self.history[-3:] if m.get("content")
             )
             retrieval_query = f"{query} {self.summary} {recent_context}".strip()
-            retrieved = self.retrieve_relevant(retrieval_query, rag_top_k, rag_initial_k, use_reranker)
+            retrieved = self.retrieve_relevant(retrieval_query, rag_top_k, rag_initial_k, use_reranker, True)
             if retrieved:
                 retrieved = self._fit_retrieved_to_budget(retrieved, rag_budget, token_counter)
                 if retrieved:
@@ -230,3 +242,39 @@ class Session:
         msgs.extend(history_msgs)
         
         return msgs
+
+    def get_token_breakdown(self, counter: TokenCounter) -> dict:
+        """Get detailed token usage breakdown per component.
+        
+        Returns a dict with:
+        - total: Total tokens in session
+        - system_prompt: Tokens for system prompt
+        - summary: Tokens for conversation summary
+        - history: Tokens for conversation history
+        - history_count: Number of history messages
+        - rag_estimate: Estimated RAG tokens (if RAG were used)
+        - breakdown_by_role: Token counts by role
+        """
+        system_tokens = counter.count(self.system_prompt) + 4
+        summary_tokens = counter.count(self.summary) + 4 if self.summary else 0
+        
+        history_tokens = 0
+        breakdown_by_role = {"user": 0, "assistant": 0, "tool": 0, "system": system_tokens}
+        
+        for msg in self.history:
+            content = msg.get("content") or ""
+            role = msg.get("role", "unknown")
+            tokens = counter.count(content) + 4
+            history_tokens += tokens
+            breakdown_by_role[role] = breakdown_by_role.get(role, 0) + tokens
+        
+        total = system_tokens + summary_tokens + history_tokens
+        
+        return {
+            "total": total,
+            "system_prompt": system_tokens,
+            "summary": summary_tokens,
+            "history": history_tokens,
+            "history_count": len(self.history),
+            "breakdown_by_role": breakdown_by_role,
+        }

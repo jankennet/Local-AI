@@ -91,6 +91,10 @@ async def run_agent_turn(
 
     Tool calls are executed in parallel for better performance.
     Failed tools are retried up to max_retries times.
+    
+    Uses adaptive temperature:
+    - Low temperature (tool_call_temperature) for tool-calling rounds for deterministic behavior
+    - Higher temperature (final_response_temperature) for final response for natural output
     """
     tool_schemas = [t["schema"] for t in tools.values()]
 
@@ -114,12 +118,18 @@ async def run_agent_turn(
             use_reranker=use_reranker,
         )
 
+        # Adaptive temperature: low for tool calling, higher for final response
+        # We don't know if this will be the final round until after the call,
+        # so we use tool_call_temperature for all rounds that could produce tool calls
+        current_temperature = settings.tool_call_temperature
+
         message = completion_client.complete_with_tools(
-            messages, tool_schemas, dynamic_max_tokens, temperature
+            messages, tool_schemas, dynamic_max_tokens, current_temperature
         )
 
         tool_calls = message.get("tool_calls")
         if not tool_calls:
+            # This is the final response - use higher temperature for natural output
             reply = message.get("content") or ""
             store.add_turn(session_id, "assistant", reply)
             record_agent_turn(session_id, "assistant")

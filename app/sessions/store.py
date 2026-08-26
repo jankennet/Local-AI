@@ -20,6 +20,7 @@ from .repository import SessionRepository
 from .eviction import EvictionStrategy, _session_tokens
 from ..tokenizer import TokenCounter
 from ..embeddings import EmbeddingService, VectorStore
+from ..metrics import set_session_tokens
 
 
 class SessionStore:
@@ -91,6 +92,13 @@ class SessionStore:
         if self._embedding_service:
             s.init_vector_store(self._embedding_service, self._vector_store_factory)
         self._repo.save(self._sessions)
+        
+        # Record token usage metrics
+        try:
+            tokens_used = _session_tokens(s, self._counter)
+            set_session_tokens(session_id, tokens_used, self.budget)
+        except Exception:
+            pass  # Metrics are best-effort
 
     def build_messages(self, session_id: str, use_rag: bool = False, query: Optional[str] = None, rag_top_k: int = None, rag_initial_k: int = None, use_reranker: bool = None) -> list:
         return self._sessions[session_id].build_messages(
