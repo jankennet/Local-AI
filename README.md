@@ -135,6 +135,25 @@ Switch via `LLM_VECTOR_BACKEND=qdrant|simple`.
 
 The server estimates response length from query complexity (length, code keywords, multi-part questions) and adjusts `max_tokens` per request. Simple Q&A gets ~256 tokens; complex coding tasks get ~1000-2000.
 
+**Tool Output Optimization (env vars):**
+| Variable | Default | Description |
+|---|---|---|
+| `LLM_TOOL_OUTPUT_MAX_TOKENS` | 512 | Max tokens for tool results before summarization |
+| `LLM_TOOL_OUTPUT_SUMMARIZE` | true | Enable tool result summarization (preserves errors/key output) |
+
+Tool results (file reads, command output) are automatically summarized to preserve errors, warnings, and success markers while fitting token budget.
+
+**Per-Component Token Budgets (env vars):**
+| Variable | Default | Description |
+|---|---|---|
+| `LLM_BUDGET_SYSTEM_PROMPT_PCT` | 0.05 | % of budget for system prompt |
+| `LLM_BUDGET_SUMMARY_PCT` | 0.10 | % of budget for conversation summary |
+| `LLM_BUDGET_HISTORY_PCT` | 0.60 | % of budget for recent history |
+| `LLM_BUDGET_RAG_PCT` | 0.15 | % of budget for retrieved context |
+| `LLM_BUDGET_TOOLS_PCT` | 0.10 | % of budget for tool results |
+
+Each component gets a guaranteed slice of the token budget. History is trimmed from oldest; RAG/tool results are compressed; summary is truncated if needed.
+
 **CPU-friendly reranker options** (no AVX2 needed):
 - `cross-encoder/ms-marco-MiniLM-L-6-v2` (22M, fast, default)
 - `cross-encoder/ms-marco-MiniLM-L-12-v2` (33M, better quality)
