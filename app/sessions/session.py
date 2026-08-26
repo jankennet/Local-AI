@@ -12,6 +12,7 @@ from typing import List, Optional, Tuple, Callable
 
 from ..embeddings import EmbeddingService, VectorStore, rerank
 from ..config import settings
+from ..tokenizer import TokenCounter
 
 
 @dataclass
@@ -77,7 +78,52 @@ class Session:
         
         return candidates[:top_k]
 
-    def build_messages(self, use_rag: bool = False, query: Optional[str] = None, rag_top_k: int = None, rag_initial_k: int = None, use_reranker: bool = None) -> list:
+    def _compress_turn(self, text: str, max_tokens: int, counter: TokenCounter) -> str:
+        """Compress a single turn to fit within max_tokens by truncating."""
+        tokens = counter.count(text)
+        if tokens <= max_tokens:
+            return text
+        # Truncate to roughly max_tokens (approximate)
+        ratio = max_tokens / tokens
+        keep_chars = int(len(text) * ratio * 0.9)  # conservative
+        return text[:keep_chars] + "… [truncated]"
+
+    def _fit_retrieved_to_budget(
+        self,
+        retrieved: List[Tuple[float, str, dict]],
+        budget: int,
+        counter: TokenCounter,
+    ) -> List[Tuple[float, str, dict]]:
+        """Trim/compress retrieved turns to fit within token budget."""
+        if not retrieved:
+            return []
+        
+        # First pass: compress each turn proportionally
+        compressed = []
+        for score, text, meta in retrieved:
+            # Reserve tokens per turn (max per turn = budget / num_turns)
+            max_per_turn = max(50, budget // len(retrieved))
+            compressed_text = self._compress_turn(text, max_per_turn, counter)
+            compressed.append((score, compressed_text, meta))
+        
+        # Second pass: if still over budget, drop lowest-scoring turns
+        total_tokens = sum(counter.count(t) for _, t, _ in compressed) + 4 * len(compressed)
+        while total_tokens > budget and compressed:
+            # Drop the lowest-scoring turn
+            compressed.pop()
+            total_tokens = sum(counter.count(t) for _, t, _ in compressed) + 4 * len(compressed)
+        
+        return compressed
+
+    def build_messages(
+        self,
+        use_rag: bool = False,
+        query: Optional[str] = None,
+        rag_top_k: int = None,
+        rag_initial_k: int = None,
+        use_reranker: bool = None,
+        token_counter: Optional[TokenCounter] = None,
+    ) -> list:
         msgs = [{"role": "system", "content": self.system_prompt}]
 
         if use_rag and query and self._vector_store:
@@ -87,9 +133,13 @@ class Session:
             )
             retrieval_query = f"{query} {self.summary} {recent_context}".strip()
             retrieved = self.retrieve_relevant(retrieval_query, rag_top_k, rag_initial_k, use_reranker)
-            if retrieved:
-                context_lines = [f"[Relevant context]: {text}" for _, text, _ in retrieved]
-                msgs.append({"role": "system", "content": "\n".join(context_lines)})
+            if retrieved and token_counter:
+                # Fit retrieved context to token budget
+                rag_budget = settings.rag_token_budget
+                retrieved = self._fit_retrieved_to_budget(retrieved, rag_budget, token_counter)
+                if retrieved:
+                    context_lines = [f"[Relevant context]: {text}" for _, text, _ in retrieved]
+                    msgs.append({"role": "system", "content": "\n".join(context_lines)})
 
         if self.summary:
             msgs.append({"role": "system",

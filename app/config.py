@@ -28,6 +28,8 @@ class Settings:
     models_dir: str = "models"
     sessions_file: str = "sessions.json"
     reserve_for_response: int = 768
+    reserve_for_response_min: int = 256      # Minimum reserve for short queries
+    reserve_for_response_max: int = 2048     # Maximum reserve for complex queries
     session_ttl_days: int = 30
     cleanup_interval_seconds: int = 3600
     llama_server_bin: str = "llama.cpp/build/bin/llama-server"
@@ -45,6 +47,7 @@ class Settings:
     # RAG settings
     rag_top_k: int = 5                    # Final results after reranking
     rag_initial_k: int = 20               # Initial vector search breadth
+    rag_token_budget: int = 1024          # Max tokens for retrieved context
     reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"  # Lightweight, no AVX2
     reranker_enabled: bool = True         # Disable if too slow on CPU
     tool_timeout_seconds: float = 30.0
@@ -68,6 +71,8 @@ def load_settings() -> Settings:
         models_dir=os.environ.get("LLM_MODELS_DIR", "models"),
         sessions_file=os.environ.get("LLM_SESSIONS_FILE", "sessions.json"),
         reserve_for_response=int(os.environ.get("LLM_RESERVE_FOR_RESPONSE", "768")),
+        reserve_for_response_min=int(os.environ.get("LLM_RESERVE_FOR_RESPONSE_MIN", "256")),
+        reserve_for_response_max=int(os.environ.get("LLM_RESERVE_FOR_RESPONSE_MAX", "2048")),
         session_ttl_days=int(os.environ.get("LLM_SESSION_TTL_DAYS", "30")),
         cleanup_interval_seconds=int(os.environ.get("LLM_CLEANUP_INTERVAL_SECONDS", "3600")),
         llama_server_bin=os.environ.get("LLM_LLAMA_SERVER_BIN", "llama.cpp/build/bin/llama-server"),
@@ -79,6 +84,7 @@ def load_settings() -> Settings:
         vector_collection=os.environ.get("LLM_VECTOR_COLLECTION", "conversations"),
         rag_top_k=int(os.environ.get("LLM_RAG_TOP_K", "5")),
         rag_initial_k=int(os.environ.get("LLM_RAG_INITIAL_K", "20")),
+        rag_token_budget=int(os.environ.get("LLM_RAG_TOKEN_BUDGET", "1024")),
         reranker_model=os.environ.get("LLM_RERANKER_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2"),
         reranker_enabled=os.environ.get("LLM_RERANKER_ENABLED", "true").lower() == "true",
         tool_timeout_seconds=float(os.environ.get("LLM_TOOL_TIMEOUT_SECONDS", "30.0")),

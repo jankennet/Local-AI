@@ -92,8 +92,15 @@ class SessionStore:
             s.init_vector_store(self._embedding_service, self._vector_store_factory)
         self._repo.save(self._sessions)
 
-    def build_messages(self, session_id: str, use_rag: bool = False, query: Optional[str] = None, rag_top_k: int = 3) -> list:
-        return self._sessions[session_id].build_messages(use_rag=use_rag, query=query, rag_top_k=rag_top_k)
+    def build_messages(self, session_id: str, use_rag: bool = False, query: Optional[str] = None, rag_top_k: int = None, rag_initial_k: int = None, use_reranker: bool = None) -> list:
+        return self._sessions[session_id].build_messages(
+            use_rag=use_rag,
+            query=query,
+            rag_top_k=rag_top_k,
+            rag_initial_k=rag_initial_k,
+            use_reranker=use_reranker,
+            token_counter=self._counter,
+        )
 
     def tokens_used(self, session_id: str) -> int:
         """Current token count for a session, using the same counting

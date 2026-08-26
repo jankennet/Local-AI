@@ -30,6 +30,46 @@ DEFAULT_TOOL_TIMEOUT = 30.0
 MAX_TOOL_RETRIES = 2
 
 
+def estimate_response_reserve(query: str, min_reserve: int, max_reserve: int) -> int:
+    """Estimate response token reserve based on query complexity.
+    
+    Heuristics:
+    - Short/simple queries -> min_reserve
+    - Code/technical queries -> higher reserve
+    - Long/multi-part queries -> higher reserve
+    """
+    q_lower = query.lower().strip()
+    length = len(q_lower)
+    words = len(q_lower.split())
+    
+    # Base score from length
+    if length < 50 and words < 10:
+        score = 0.0  # Simple question
+    elif length < 200 and words < 40:
+        score = 0.3  # Normal question
+    else:
+        score = 0.6  # Complex/long question
+    
+    # Boost for code/technical indicators
+    code_indicators = ['code', 'function', 'class', 'debug', 'error', 'implement',
+                       'write', 'create', 'build', 'refactor', 'optimize', 'fix',
+                       'how to', 'example', 'script', 'api', 'database', 'sql',
+                       'algorithm', 'data structure', 'async', 'thread']
+    for ind in code_indicators:
+        if ind in q_lower:
+            score += 0.1
+            break
+    
+    # Boost for multi-part questions
+    if '?' in q_lower and q_lower.count('?') > 1:
+        score += 0.15
+    if any(w in q_lower for w in ['and', 'also', 'then', 'next', 'after']):
+        score += 0.1
+    
+    score = min(1.0, score)
+    return int(min_reserve + (max_reserve - min_reserve) * score)
+
+
 async def run_agent_turn(
     store: SessionStore,
     session_id: str,
@@ -54,6 +94,15 @@ async def run_agent_turn(
     """
     tool_schemas = [t["schema"] for t in tools.values()]
 
+    # Dynamic max_tokens based on query complexity
+    dynamic_max_tokens = max_tokens
+    if rag_query:
+        dynamic_max_tokens = estimate_response_reserve(
+            rag_query,
+            settings.reserve_for_response_min,
+            settings.reserve_for_response_max,
+        )
+
     for round_num in range(MAX_TOOL_ROUNDS):
         record_agent_round(session_id)
         messages = store.build_messages(
@@ -66,7 +115,7 @@ async def run_agent_turn(
         )
 
         message = completion_client.complete_with_tools(
-            messages, tool_schemas, max_tokens, temperature
+            messages, tool_schemas, dynamic_max_tokens, temperature
         )
 
         tool_calls = message.get("tool_calls")

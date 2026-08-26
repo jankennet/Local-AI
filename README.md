@@ -123,8 +123,17 @@ Switch via `LLM_VECTOR_BACKEND=qdrant|simple`.
 |---|---|---|
 | `LLM_RAG_TOP_K` | 5 | Final results after reranking |
 | `LLM_RAG_INITIAL_K` | 20 | Initial vector search breadth (broader = better recall) |
+| `LLM_RAG_TOKEN_BUDGET` | 1024 | Max tokens for retrieved context (prevents crowding recent history) |
 | `LLM_RERANKER_ENABLED` | true | Enable cross-encoder reranking |
 | `LLM_RERANKER_MODEL` | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Reranker model (CPU-friendly, 22M params) |
+
+**Dynamic Response Reserve (env vars):**
+| Variable | Default | Description |
+|---|---|---|
+| `LLM_RESERVE_FOR_RESPONSE_MIN` | 256 | Minimum tokens reserved for short/simple queries |
+| `LLM_RESERVE_FOR_RESPONSE_MAX` | 2048 | Maximum tokens reserved for complex/code queries |
+
+The server estimates response length from query complexity (length, code keywords, multi-part questions) and adjusts `max_tokens` per request. Simple Q&A gets ~256 tokens; complex coding tasks get ~1000-2000.
 
 **CPU-friendly reranker options** (no AVX2 needed):
 - `cross-encoder/ms-marco-MiniLM-L-6-v2` (22M, fast, default)
