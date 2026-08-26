@@ -16,6 +16,7 @@ freeze the rest of the app — session listing, etc. — while it's underway.
 import asyncio
 
 from .server_launcher import launch_llama_server, relaunch_with_config
+from .log_buffer import get_log_buffer
 from ..metrics import record_llama_restart, update_llama_server_config
 
 CHECK_INTERVAL_SECONDS = 15
@@ -25,6 +26,8 @@ async def watch_llama_server(
     binary: str, model_path: str, host: str, port: int, vram_tier: str,
     process_holder: dict, config_holder: dict,
 ) -> None:
+    log_buffer = get_log_buffer()
+    
     while True:
         await asyncio.sleep(CHECK_INTERVAL_SECONDS)
 
@@ -35,7 +38,7 @@ async def watch_llama_server(
         print("[watchdog] llama-server process died — relaunching with last-known config")
         try:
             result = await asyncio.to_thread(
-                relaunch_with_config, binary, model_path, host, port, config_holder["config"]
+                relaunch_with_config, binary, model_path, host, port, config_holder["config"], log_buffer
             )
             if result is not None:
                 process_holder["process"], _base_url = result
@@ -45,7 +48,7 @@ async def watch_llama_server(
 
             print("[watchdog] relaunch with last-known config failed — retrying full adaptive search")
             process, _base_url, config = await asyncio.to_thread(
-                launch_llama_server, binary, model_path, host, port, vram_tier
+                launch_llama_server, binary, model_path, host, port, vram_tier, log_buffer
             )
             process_holder["process"] = process
             if config["n_ctx"] != config_holder["config"]["n_ctx"]:

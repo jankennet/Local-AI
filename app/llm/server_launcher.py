@@ -17,9 +17,12 @@ responsible for terminating it on shutdown.
 """
 
 import subprocess
+import threading
 import time
 
 import requests
+
+from .log_buffer import LogBuffer, capture_stream
 
 PERFORMANCE_TIERS = {
     "4GB": [{"n_ctx": 8192, "n_batch": 128},
@@ -76,18 +79,32 @@ def get_adaptive_configs(vram_tier: str) -> list:
     return configs
 
 
+def _start_capture_threads(process: subprocess.Popen, log_buffer: LogBuffer) -> tuple[threading.Thread, threading.Thread]:
+    """Start background threads to capture stdout/stderr."""
+    stdout_thread = threading.Thread(
+        target=capture_stream,
+        args=(process.stdout, log_buffer, "stdout"),
+        daemon=True,
+    )
+    stderr_thread = threading.Thread(
+        target=capture_stream,
+        args=(process.stderr, log_buffer, "stderr"),
+        daemon=True,
+    )
+    stdout_thread.start()
+    stderr_thread.start()
+    return stdout_thread, stderr_thread
+
+
 def _build_command(binary: str, model_path: str, host: str, port: int, config: dict) -> list:
     cmd = [
         binary,
         "--model", model_path,
         "--host", host,
         "--port", str(port),
-        "--n-gpu-layers", "99",  # large-enough-to-mean-"all" is llama-server's own convention
+        "--n-gpu-layers", "99",
         "--ctx-size", str(config["n_ctx"]),
         "-b", str(config["n_batch"]),
-        # Renders the GGUF's own embedded chat template (via llama.cpp's
-        # built-in Jinja engine) instead of a hardcoded format — this is
-        # what makes tool-calling generalize across model families.
         "--jinja",
     ]
     if config["kv_quant"]:
@@ -98,7 +115,7 @@ def _build_command(binary: str, model_path: str, host: str, port: int, config: d
 def _wait_until_healthy(base_url: str, process: subprocess.Popen, deadline: float) -> bool:
     while time.time() < deadline:
         if process.poll() is not None:
-            return False  # process exited early — this config failed to load
+            return False
         try:
             if requests.get(f"{base_url}/health", timeout=2).status_code == 200:
                 return True
@@ -116,13 +133,14 @@ def terminate_process(process: subprocess.Popen) -> None:
         process.kill()
 
 
-def relaunch_with_config(binary: str, model_path: str, host: str, port: int, config: dict):
-    """Try relaunching with the exact config that already worked once —
-    used by the watchdog to recover from a crash without re-running the
-    whole adaptive search. Returns (process, base_url) or None on failure."""
+def relaunch_with_config(binary: str, model_path: str, host: str, port: int, config: dict, log_buffer: LogBuffer):
+    """Try relaunching with the exact config that already worked once.
+    Returns (process, base_url) or None on failure."""
     cmd = _build_command(binary, model_path, host, port, config)
-    process = subprocess.Popen(cmd)
+    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     base_url = f"http://{host}:{port}"
+
+    _start_capture_threads(process, log_buffer)
 
     if _wait_until_healthy(base_url, process, time.time() + HEALTH_TIMEOUT_SECONDS):
         return process, base_url
@@ -131,14 +149,16 @@ def relaunch_with_config(binary: str, model_path: str, host: str, port: int, con
     return None
 
 
-def launch_llama_server(binary: str, model_path: str, host: str, port: int, vram_tier: str):
+def launch_llama_server(binary: str, model_path: str, host: str, port: int, vram_tier: str, log_buffer: LogBuffer):
     """Returns (process, base_url, selected_config). Raises RuntimeError if
     every config in the tier fails to come up healthy."""
     base_url = f"http://{host}:{port}"
 
     for config in get_adaptive_configs(vram_tier):
         cmd = _build_command(binary, model_path, host, port, config)
-        process = subprocess.Popen(cmd)  # inherits our stdout/stderr — same log visibility as before
+        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+        _start_capture_threads(process, log_buffer)
 
         if _wait_until_healthy(base_url, process, time.time() + HEALTH_TIMEOUT_SECONDS):
             return process, base_url, config

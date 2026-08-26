@@ -34,6 +34,7 @@ from .llm.gpu_detect import detect_gpu, get_vram_tier
 from .llm.catalog import get_existing_models, download_model, MODEL_CATALOG
 from .llm.server_launcher import launch_llama_server, terminate_process
 from .llm.watchdog import watch_llama_server
+from .llm.log_buffer import LogBuffer, set_log_buffer
 from .llm.completion_client import LoopbackCompletionClient
 from .llm.tools import TOOLS
 from .routes.sessions_router import build_sessions_router
@@ -74,12 +75,19 @@ def resolve_model_path() -> tuple[str, str]:
 
 def create_app() -> FastAPI:
     model_path, vram_tier = resolve_model_path()
+    
+    # Create log buffer for llama-server output
+    log_buffer = LogBuffer(max_lines=100)
+    set_log_buffer(log_buffer)
+    
     process, base_url, selected_config = launch_llama_server(
-        settings.llama_server_bin, model_path, "127.0.0.1", settings.internal_port, vram_tier
+        settings.llama_server_bin, model_path, "127.0.0.1", settings.internal_port, vram_tier,
+        log_buffer
     )
     kv_note = "q8_0 (quantized)" if selected_config["kv_quant"] else "f16 (default)"
     print(f"Native llama-server ready at {base_url} — n_ctx={selected_config['n_ctx']}, "
           f"n_batch={selected_config['n_batch']}, kv_cache={kv_note}")
+    print("Llama-server logs captured to rolling buffer (last 100 lines). Errors will dump buffer.")
 
     counter = LlamaVocabTokenCounter(model_path)
     repository = JSONSessionRepository(settings.sessions_file)

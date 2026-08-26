@@ -11,6 +11,7 @@ This means store.py never changes when you swap tokenizer, storage
 backend, or eviction policy — only the composition root (main.py) does.
 """
 
+import logging
 import time
 import uuid
 from typing import Callable, Dict, List, Optional
@@ -21,6 +22,8 @@ from .eviction import EvictionStrategy, _session_tokens
 from ..tokenizer import TokenCounter
 from ..embeddings import EmbeddingService, VectorStore
 from ..metrics import set_session_tokens
+
+logger = logging.getLogger(__name__)
 
 
 class SessionStore:
@@ -97,6 +100,7 @@ class SessionStore:
         try:
             tokens_used = _session_tokens(s, self._counter)
             set_session_tokens(session_id, tokens_used, self.budget)
+            logger.info(f"Session {session_id[:8]}: {tokens_used}/{self.budget} tokens ({tokens_used/self.budget*100:.1f}%) role={role}")
         except Exception:
             pass  # Metrics are best-effort
 

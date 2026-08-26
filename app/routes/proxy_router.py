@@ -10,6 +10,7 @@ native server — they don't need to know a second process exists.
 
 import json
 import logging
+import sys
 import time
 import uuid
 from fastapi import APIRouter, Depends, Request
@@ -17,8 +18,33 @@ from fastapi.responses import Response
 import requests
 
 from ..auth import verify_api_key
+from ..llm.log_buffer import get_log_buffer
 
 logger = logging.getLogger(__name__)
+
+# Condensed log format: single line per request
+def _log_request_line(request_id: str, method: str, path: str, status_code: int, duration_ms: int, error: str = None) -> None:
+    """Log a single condensed line for the request."""
+    if error:
+        logger.error(f"REQ {request_id} {method} /v1/{path} -> {status_code} ({duration_ms}ms) ERROR: {error}")
+    elif status_code >= 400:
+        logger.warning(f"REQ {request_id} {method} /v1/{path} -> {status_code} ({duration_ms}ms)")
+    else:
+        logger.info(f"REQ {request_id} {method} /v1/{path} -> {status_code} ({duration_ms}ms)")
+
+
+def _dump_llama_logs_on_error(request_id: str, path: str, method: str, status_code: int, error: str = None) -> None:
+    """Dump llama-server logs when request fails."""
+    log_buffer = get_log_buffer()
+    if not log_buffer:
+        return
+    
+    dump = log_buffer.dump(
+        prefix=f"LLAMA-SERVER LOGS FOR FAILED REQUEST {request_id}: {method} /v1/{path} -> {status_code}"
+    )
+    # Print directly to stderr for maximum visibility
+    sys.stderr.write(dump)
+    sys.stderr.flush()
 
 
 def build_proxy_router(base_url: str) -> APIRouter:
@@ -30,18 +56,6 @@ def build_proxy_router(base_url: str) -> APIRouter:
         start_time = time.time()
 
         body = await request.body()
-        client_host = request.client.host if request.client else "unknown"
-
-        logger.info(
-            "Proxy request started",
-            extra={
-                "request_id": request_id,
-                "path": path,
-                "method": request.method,
-                "client": client_host,
-                "body_size": len(body),
-            },
-        )
 
         try:
             upstream = requests.request(
@@ -56,47 +70,10 @@ def build_proxy_router(base_url: str) -> APIRouter:
             duration_ms = int((time.time() - start_time) * 1000)
 
             if upstream.status_code >= 400:
-                try:
-                    body_str = body.decode("utf-8")
-                    body_json = json.loads(body_str) if body_str else {}
-                    logger.warning(
-                        "Upstream request failed",
-                        extra={
-                            "request_id": request_id,
-                            "path": path,
-                            "method": request.method,
-                            "status_code": upstream.status_code,
-                            "duration_ms": duration_ms,
-                            "request_body": body_json,
-                            "response_body": upstream.text[:500],
-                        },
-                    )
-                except Exception as e:
-                    logger.warning(
-                        "Upstream request failed (could not parse body)",
-                        extra={
-                            "request_id": request_id,
-                            "path": path,
-                            "method": request.method,
-                            "status_code": upstream.status_code,
-                            "duration_ms": duration_ms,
-                            "raw_body": body[:500] if body else None,
-                            "response_body": upstream.text[:500],
-                            "parse_error": str(e),
-                        },
-                    )
+                _log_request_line(request_id, request.method, path, upstream.status_code, duration_ms)
+                _dump_llama_logs_on_error(request_id, path, request.method, upstream.status_code)
             else:
-                logger.info(
-                    "Proxy request completed",
-                    extra={
-                        "request_id": request_id,
-                        "path": path,
-                        "method": request.method,
-                        "status_code": upstream.status_code,
-                        "duration_ms": duration_ms,
-                        "response_size": len(upstream.content),
-                    },
-                )
+                _log_request_line(request_id, request.method, path, upstream.status_code, duration_ms)
 
             return Response(
                 content=upstream.content,
@@ -107,15 +84,8 @@ def build_proxy_router(base_url: str) -> APIRouter:
 
         except requests.exceptions.Timeout:
             duration_ms = int((time.time() - start_time) * 1000)
-            logger.error(
-                "Upstream request timeout",
-                extra={
-                    "request_id": request_id,
-                    "path": path,
-                    "method": request.method,
-                    "duration_ms": duration_ms,
-                },
-            )
+            _log_request_line(request_id, request.method, path, 504, duration_ms, "TIMEOUT")
+            _dump_llama_logs_on_error(request_id, path, request.method, 504, "TIMEOUT")
             return Response(
                 content=json.dumps({"error": "Upstream timeout"}),
                 status_code=504,
@@ -124,16 +94,8 @@ def build_proxy_router(base_url: str) -> APIRouter:
             )
         except requests.exceptions.ConnectionError as e:
             duration_ms = int((time.time() - start_time) * 1000)
-            logger.error(
-                "Upstream connection error",
-                extra={
-                    "request_id": request_id,
-                    "path": path,
-                    "method": request.method,
-                    "duration_ms": duration_ms,
-                    "error": str(e),
-                },
-            )
+            _log_request_line(request_id, request.method, path, 503, duration_ms, f"CONNECTION_ERROR: {e}")
+            _dump_llama_logs_on_error(request_id, path, request.method, 503, f"CONNECTION_ERROR: {e}")
             return Response(
                 content=json.dumps({"error": "Upstream unavailable"}),
                 status_code=503,
@@ -142,16 +104,8 @@ def build_proxy_router(base_url: str) -> APIRouter:
             )
         except Exception as e:
             duration_ms = int((time.time() - start_time) * 1000)
-            logger.exception(
-                "Proxy request error",
-                extra={
-                    "request_id": request_id,
-                    "path": path,
-                    "method": request.method,
-                    "duration_ms": duration_ms,
-                    "error": str(e),
-                },
-            )
+            _log_request_line(request_id, request.method, path, 500, duration_ms, f"EXCEPTION: {e}")
+            _dump_llama_logs_on_error(request_id, path, request.method, 500, f"EXCEPTION: {e}")
             return Response(
                 content=json.dumps({"error": "Internal proxy error"}),
                 status_code=500,
