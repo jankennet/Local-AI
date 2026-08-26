@@ -3,6 +3,8 @@ embeddings.py
 
 Local embedding service for semantic retrieval of conversation history.
 Supports multiple models (general + code-specialized) with different dimensions.
+
+Also provides a Reranker service for cross-encoder reranking of retrieved results.
 """
 
 import os
@@ -14,10 +16,13 @@ import numpy as np
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qmodels
 
-_GENERAL_MODEL = os.getenv("EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
-_CODE_MODEL = os.getenv("EMBEDDING_MODEL_CODE", "microsoft/codebert-base")
+_GENERAL_MODEL = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+_CODE_MODEL = os.getenv("EMBEDDING_MODEL_CODE", "sentence-transformers/all-MiniLM-L6-v2")
+_RERANKER_MODEL = os.getenv("RERANKER_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
 _LOCK = threading.Lock()
 _MODELS: Dict[str, "SentenceTransformer"] = {}
+_RERANKER: Optional["CrossEncoder"] = None
+_RERANKER_LOCK = threading.Lock()
 
 
 def _get_model(model_name: str):
@@ -27,6 +32,58 @@ def _get_model(model_name: str):
                 from sentence_transformers import SentenceTransformer
                 _MODELS[model_name] = SentenceTransformer(model_name, device="cpu")
     return _MODELS[model_name]
+
+
+def _get_reranker(model_name: str):
+    """Get or create the cross-encoder reranker."""
+    global _RERANKER
+    if _RERANKER is None:
+        with _RERANKER_LOCK:
+            if _RERANKER is None:
+                try:
+                    from sentence_transformers import CrossEncoder
+                    _RERANKER = CrossEncoder(model_name, device="cpu", max_length=512)
+                except Exception as e:
+                    # Fallback: disable reranker if model fails to load
+                    import logging
+                    logging.getLogger(__name__).warning(f"Failed to load reranker {model_name}: {e}")
+                    _RERANKER = False  # Sentinel for "tried and failed"
+    return _RERANKER if _RERANKER is not False else None
+
+
+def rerank(query: str, candidates: List[Tuple[float, str, dict]], top_k: int) -> List[Tuple[float, str, dict]]:
+    """
+    Rerank candidates using a cross-encoder.
+    
+    Args:
+        query: The search query
+        candidates: List of (score, text, metadata) from vector search
+        top_k: Number of top results to return after reranking
+    
+    Returns:
+        Reranked list of (score, text, metadata) sorted by reranker score
+    """
+    if not candidates:
+        return []
+    
+    reranker = _get_reranker(_RERANKER_MODEL)
+    if reranker is None:
+        return candidates[:top_k]  # Fallback: return original order
+    
+    # Prepare pairs for cross-encoder
+    pairs = [(query, text) for _, text, _ in candidates]
+    
+    # Get reranker scores
+    try:
+        scores = reranker.predict(pairs, show_progress_bar=False, batch_size=32)
+    except Exception:
+        return candidates[:top_k]  # Fallback: return original order if reranker fails
+    
+    # Combine with original metadata and sort
+    reranked = list(zip(scores, [t for _, t, _ in candidates], [m for _, _, m in candidates]))
+    reranked.sort(key=lambda x: x[0], reverse=True)
+    
+    return reranked[:top_k]
 
 
 class EmbeddingService:

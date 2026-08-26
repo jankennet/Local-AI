@@ -21,6 +21,7 @@ from .tools import TOOLS
 from ..metrics import (
     record_agent_round, record_agent_turn, record_tool_call,
 )
+from ..config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,9 @@ async def run_agent_turn(
     rag_query: str = None,
     tool_timeout: float = DEFAULT_TOOL_TIMEOUT,
     max_retries: int = MAX_TOOL_RETRIES,
+    rag_top_k: int = None,
+    rag_initial_k: int = None,
+    use_reranker: bool = None,
 ) -> str:
     """Runs the tool-call loop for the pending user turn on `session_id`.
     Returns the final assistant reply text. Every step (assistant
@@ -52,7 +56,14 @@ async def run_agent_turn(
 
     for round_num in range(MAX_TOOL_ROUNDS):
         record_agent_round(session_id)
-        messages = store.build_messages(session_id, use_rag=rag_query is not None, query=rag_query)
+        messages = store.build_messages(
+            session_id,
+            use_rag=rag_query is not None,
+            query=rag_query,
+            rag_top_k=rag_top_k,
+            rag_initial_k=rag_initial_k,
+            use_reranker=use_reranker,
+        )
 
         message = completion_client.complete_with_tools(
             messages, tool_schemas, max_tokens, temperature

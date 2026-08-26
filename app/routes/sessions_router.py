@@ -20,6 +20,7 @@ from ..metrics import (
     record_session_created, record_session_deleted, record_session_expired,
     set_session_tokens, remove_session_metrics,
 )
+from ..config import settings
 
 
 def build_sessions_router(
@@ -73,6 +74,9 @@ def build_sessions_router(
             rag_query=req.message,
             tool_timeout=tool_timeout_seconds,
             max_retries=tool_max_retries,
+            rag_top_k=settings.rag_top_k,
+            rag_initial_k=settings.rag_initial_k,
+            use_reranker=settings.reranker_enabled,
         )
 
         # Update session token metrics

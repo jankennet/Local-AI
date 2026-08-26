@@ -42,6 +42,11 @@ class Settings:
     vector_backend: str = "qdrant"
     vector_db_path: str = "./qdrant_db"
     vector_collection: str = "conversations"
+    # RAG settings
+    rag_top_k: int = 5                    # Final results after reranking
+    rag_initial_k: int = 20               # Initial vector search breadth
+    reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"  # Lightweight, no AVX2
+    reranker_enabled: bool = True         # Disable if too slow on CPU
     tool_timeout_seconds: float = 30.0
     tool_max_retries: int = 2
 
@@ -72,6 +77,10 @@ def load_settings() -> Settings:
         vector_backend=os.environ.get("LLM_VECTOR_BACKEND", "qdrant"),
         vector_db_path=os.environ.get("LLM_VECTOR_DB_PATH", "./qdrant_db"),
         vector_collection=os.environ.get("LLM_VECTOR_COLLECTION", "conversations"),
+        rag_top_k=int(os.environ.get("LLM_RAG_TOP_K", "5")),
+        rag_initial_k=int(os.environ.get("LLM_RAG_INITIAL_K", "20")),
+        reranker_model=os.environ.get("LLM_RERANKER_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2"),
+        reranker_enabled=os.environ.get("LLM_RERANKER_ENABLED", "true").lower() == "true",
         tool_timeout_seconds=float(os.environ.get("LLM_TOOL_TIMEOUT_SECONDS", "30.0")),
         tool_max_retries=int(os.environ.get("LLM_TOOL_MAX_RETRIES", "2")),
     )

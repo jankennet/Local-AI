@@ -10,7 +10,8 @@ from dataclasses import dataclass, field, asdict, fields
 import time
 from typing import List, Optional, Tuple, Callable
 
-from ..embeddings import EmbeddingService, VectorStore
+from ..embeddings import EmbeddingService, VectorStore, rerank
+from ..config import settings
 
 
 @dataclass
@@ -55,12 +56,28 @@ class Session:
         if self._vector_store and content.strip():
             self._vector_store.add(content, {"turn_index": turn_index, "role": role})
 
-    def retrieve_relevant(self, query: str, top_k: int = 3) -> List[Tuple[float, str, dict]]:
+    def retrieve_relevant(self, query: str, top_k: int = None, initial_k: int = None, use_reranker: bool = None) -> List[Tuple[float, str, dict]]:
         if not self._vector_store:
             return []
-        return self._vector_store.search(query, top_k)
+        
+        # Use settings defaults if not provided
+        if top_k is None:
+            top_k = settings.rag_top_k
+        if initial_k is None:
+            initial_k = settings.rag_initial_k
+        if use_reranker is None:
+            use_reranker = settings.reranker_enabled
+        
+        # Stage 1: Broad vector search
+        candidates = self._vector_store.search(query, initial_k)
+        
+        # Stage 2: Rerank with cross-encoder
+        if use_reranker and len(candidates) > top_k:
+            return rerank(query, candidates, top_k)
+        
+        return candidates[:top_k]
 
-    def build_messages(self, use_rag: bool = False, query: Optional[str] = None, rag_top_k: int = 3) -> list:
+    def build_messages(self, use_rag: bool = False, query: Optional[str] = None, rag_top_k: int = None, rag_initial_k: int = None, use_reranker: bool = None) -> list:
         msgs = [{"role": "system", "content": self.system_prompt}]
 
         if use_rag and query and self._vector_store:
@@ -69,7 +86,7 @@ class Session:
                 (m.get("content") or "") for m in self.history[-3:] if m.get("content")
             )
             retrieval_query = f"{query} {self.summary} {recent_context}".strip()
-            retrieved = self.retrieve_relevant(retrieval_query, rag_top_k)
+            retrieved = self.retrieve_relevant(retrieval_query, rag_top_k, rag_initial_k, use_reranker)
             if retrieved:
                 context_lines = [f"[Relevant context]: {text}" for _, text, _ in retrieved]
                 msgs.append({"role": "system", "content": "\n".join(context_lines)})

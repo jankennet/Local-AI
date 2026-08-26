@@ -109,7 +109,7 @@ GET    /metrics   -> Prometheus scrape endpoint (raw metrics for Grafana/Prometh
 Managed sessions (`/sessions/{id}/chat`) use a local embedding model to retrieve relevant past turns instead of stuffing everything into context:
 
 1. Query embedded (combined with recent context + summary)
-2. Top-k relevant past turns retrieved from vector store
+2. **Two-stage retrieval**: Broad vector search (default 20) → Cross-encoder rerank (default top 5)
 3. Retrieved context + recent turns + summary sent to model
 
 **Vector store backends:**
@@ -117,6 +117,18 @@ Managed sessions (`/sessions/{id}/chat`) use a local embedding model to retrieve
 - **Simple (in-memory)** — no deps, lost on restart, good for testing
 
 Switch via `LLM_VECTOR_BACKEND=qdrant|simple`.
+
+**RAG Configuration (env vars):**
+| Variable | Default | Description |
+|---|---|---|
+| `LLM_RAG_TOP_K` | 5 | Final results after reranking |
+| `LLM_RAG_INITIAL_K` | 20 | Initial vector search breadth (broader = better recall) |
+| `LLM_RERANKER_ENABLED` | true | Enable cross-encoder reranking |
+| `LLM_RERANKER_MODEL` | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Reranker model (CPU-friendly, 22M params) |
+
+**CPU-friendly reranker options** (no AVX2 needed):
+- `cross-encoder/ms-marco-MiniLM-L-6-v2` (22M, fast, default)
+- `cross-encoder/ms-marco-MiniLM-L-12-v2` (33M, better quality)
 
 > This is **conversation history RAG** (recalls what you discussed). It is **not** Continue's `@codebase` — that indexes your **repository files** separately. They work together: `@codebase` = relevant code files; server RAG = relevant past conversation turns.
 
