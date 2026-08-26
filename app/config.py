@@ -50,6 +50,15 @@ class Settings:
     rag_token_budget: int = 1024          # Max tokens for retrieved context
     reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"  # Lightweight, no AVX2
     reranker_enabled: bool = True         # Disable if too slow on CPU
+    # Tool output settings
+    tool_output_max_tokens: int = 512     # Max tokens for tool results before summarization
+    tool_output_summarize: bool = True    # Enable tool result summarization
+    # Per-component token budgets (percentages of available budget after response reserve)
+    budget_system_prompt_pct: float = 0.05   # 5% for system prompt
+    budget_summary_pct: float = 0.10         # 10% for conversation summary
+    budget_history_pct: float = 0.60         # 60% for recent history
+    budget_rag_pct: float = 0.15             # 15% for RAG context
+    budget_tools_pct: float = 0.10           # 10% for tool results
     tool_timeout_seconds: float = 30.0
     tool_max_retries: int = 2
 
@@ -87,6 +96,13 @@ def load_settings() -> Settings:
         rag_token_budget=int(os.environ.get("LLM_RAG_TOKEN_BUDGET", "1024")),
         reranker_model=os.environ.get("LLM_RERANKER_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2"),
         reranker_enabled=os.environ.get("LLM_RERANKER_ENABLED", "true").lower() == "true",
+        tool_output_max_tokens=int(os.environ.get("LLM_TOOL_OUTPUT_MAX_TOKENS", "512")),
+        tool_output_summarize=os.environ.get("LLM_TOOL_OUTPUT_SUMMARIZE", "true").lower() == "true",
+        budget_system_prompt_pct=float(os.environ.get("LLM_BUDGET_SYSTEM_PROMPT_PCT", "0.05")),
+        budget_summary_pct=float(os.environ.get("LLM_BUDGET_SUMMARY_PCT", "0.10")),
+        budget_history_pct=float(os.environ.get("LLM_BUDGET_HISTORY_PCT", "0.60")),
+        budget_rag_pct=float(os.environ.get("LLM_BUDGET_RAG_PCT", "0.15")),
+        budget_tools_pct=float(os.environ.get("LLM_BUDGET_TOOLS_PCT", "0.10")),
         tool_timeout_seconds=float(os.environ.get("LLM_TOOL_TIMEOUT_SECONDS", "30.0")),
         tool_max_retries=int(os.environ.get("LLM_TOOL_MAX_RETRIES", "2")),
     )

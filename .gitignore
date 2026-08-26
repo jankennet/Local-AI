@@ -41,3 +41,6 @@ logs/
 # Temp
 tmp/
 *.tmp
+
+# Workspace directory (runtime for file tools)
+workspace/

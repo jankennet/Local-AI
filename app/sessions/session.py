@@ -115,6 +115,46 @@ class Session:
         
         return compressed
 
+    def _fit_history_to_budget(
+        self,
+        history: list,
+        budget: int,
+        counter: TokenCounter,
+    ) -> list:
+        """Trim history from oldest to fit within token budget."""
+        if not history:
+            return []
+        
+        # Count tokens for each message
+        msg_tokens = []
+        total = 0
+        for msg in history:
+            content = msg.get("content") or ""
+            tokens = counter.count(content) + 4  # +4 for role/overhead
+            msg_tokens.append((tokens, msg))
+            total += tokens
+        
+        if total <= budget:
+            return history
+        
+        # Remove oldest messages until we fit
+        kept = []
+        kept_tokens = 0
+        for tokens, msg in msg_tokens:
+            if kept_tokens + tokens <= budget:
+                kept.append(msg)
+                kept_tokens += tokens
+            else:
+                # Try to compress this message
+                content = msg.get("content") or ""
+                remaining = budget - kept_tokens
+                if remaining > 50:
+                    compressed = self._compress_turn(content, remaining - 4, counter)
+                    kept.append({**msg, "content": compressed})
+                break
+        
+        return kept
+
     def build_messages(
         self,
         use_rag: bool = False,
@@ -124,25 +164,69 @@ class Session:
         use_reranker: bool = None,
         token_counter: Optional[TokenCounter] = None,
     ) -> list:
+        if not token_counter:
+            # Fallback to simple behavior
+            msgs = [{"role": "system", "content": self.system_prompt}]
+            if use_rag and query and self._vector_store:
+                recent_context = " ".join(
+                    (m.get("content") or "") for m in self.history[-3:] if m.get("content")
+                )
+                retrieval_query = f"{query} {self.summary} {recent_context}".strip()
+                retrieved = self.retrieve_relevant(retrieval_query, rag_top_k, rag_initial_k, use_reranker)
+                if retrieved:
+                    context_lines = [f"[Relevant context]: {text}" for _, text, _ in retrieved]
+                    msgs.append({"role": "system", "content": "\n".join(context_lines)})
+            if self.summary:
+                msgs.append({"role": "system", "content": f"[Earlier conversation summary]: {self.summary}"})
+            msgs.extend(self.history)
+            return msgs
+        
+        # Per-component budget allocation
+        total_budget = token_counter.count(self.system_prompt) + 4
+        if self.summary:
+            total_budget += token_counter.count(self.summary) + 4
+        for m in self.history:
+            total_budget += token_counter.count(m.get("content") or "") + 4
+        
+        available_budget = max(0, total_budget - token_counter.count(self.system_prompt) - 4)
+        
+        # Calculate per-component budgets
+        system_budget = int(available_budget * settings.budget_system_prompt_pct)
+        summary_budget = int(available_budget * settings.budget_summary_pct)
+        history_budget = int(available_budget * settings.budget_history_pct)
+        rag_budget = min(settings.rag_token_budget, int(available_budget * settings.budget_rag_pct))
+        tools_budget = int(available_budget * settings.budget_tools_pct)
+        
         msgs = [{"role": "system", "content": self.system_prompt}]
-
+        
+        # Add RAG context if enabled
+        rag_msgs = []
         if use_rag and query and self._vector_store:
-            # Build a better retrieval query: combine user message with recent context + summary
             recent_context = " ".join(
                 (m.get("content") or "") for m in self.history[-3:] if m.get("content")
             )
             retrieval_query = f"{query} {self.summary} {recent_context}".strip()
             retrieved = self.retrieve_relevant(retrieval_query, rag_top_k, rag_initial_k, use_reranker)
-            if retrieved and token_counter:
-                # Fit retrieved context to token budget
-                rag_budget = settings.rag_token_budget
+            if retrieved:
                 retrieved = self._fit_retrieved_to_budget(retrieved, rag_budget, token_counter)
                 if retrieved:
                     context_lines = [f"[Relevant context]: {text}" for _, text, _ in retrieved]
-                    msgs.append({"role": "system", "content": "\n".join(context_lines)})
-
+                    rag_msgs.append({"role": "system", "content": "\n".join(context_lines)})
+        
+        # Add summary if present
+        summary_msgs = []
         if self.summary:
-            msgs.append({"role": "system",
-                         "content": f"[Earlier conversation summary]: {self.summary}"})
-        msgs.extend(self.history)
+            summary_text = f"[Earlier conversation summary]: {self.summary}"
+            if token_counter.count(summary_text) > summary_budget:
+                summary_text = self._compress_turn(summary_text, summary_budget, token_counter)
+            summary_msgs.append({"role": "system", "content": summary_text})
+        
+        # Add history (most recent first, respecting budget)
+        history_msgs = self._fit_history_to_budget(self.history, history_budget, token_counter)
+        
+        # Combine: system + RAG + summary + history
+        msgs.extend(rag_msgs)
+        msgs.extend(summary_msgs)
+        msgs.extend(history_msgs)
+        
         return msgs
