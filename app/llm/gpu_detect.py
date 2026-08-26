@@ -77,4 +77,22 @@ def get_vram_tier(vram_gb: int) -> str:
         return "4GB"
     elif vram_gb <= 7:
         return "6GB"
-    return "8GB"
+    elif vram_gb <= 9:
+        return "8GB"
+    elif vram_gb <= 11:
+        return "10GB"
+    elif vram_gb <= 13:
+        return "12GB"
+    elif vram_gb <= 17:
+        return "16GB"
+    elif vram_gb <= 21:
+        return "20GB"
+    elif vram_gb <= 27:
+        return "24GB"
+    elif vram_gb <= 36:
+        return "32GB"
+    elif vram_gb <= 44:
+        return "40GB"
+    elif vram_gb <= 56:
+        return "48GB"
+    return "48GB"

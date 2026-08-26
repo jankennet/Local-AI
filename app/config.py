@@ -32,8 +32,13 @@ class Settings:
     cleanup_interval_seconds: int = 3600
     llama_server_bin: str = "llama.cpp/build/bin/llama-server"
     internal_port: int = 8081
-    embedding_model: str = "BAAI/bge-small-en-v1.5"
-    embedding_model_code: str = "microsoft/codebert-base"
+    # Embedding models (CPU-bound). For old CPUs without AVX2 (e.g. Athlon X4 860k):
+    # - sentence-transformers/all-MiniLM-L6-v2 (22M, fastest, no AVX2 needed)
+    # - BAAI/bge-small-en-v1.5 (33M, good quality, no AVX2 needed)
+    # - intfloat/multilingual-e5-small (33M, multilingual, no AVX2 needed)
+    # Avoid: bge-base/large, e5-base/large, nomic-embed-text (need AVX2 or slow)
+    embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
+    embedding_model_code: str = "sentence-transformers/all-MiniLM-L6-v2"
     vector_backend: str = "qdrant"
     vector_db_path: str = "./qdrant_db"
     vector_collection: str = "conversations"
@@ -62,8 +67,8 @@ def load_settings() -> Settings:
         cleanup_interval_seconds=int(os.environ.get("LLM_CLEANUP_INTERVAL_SECONDS", "3600")),
         llama_server_bin=os.environ.get("LLM_LLAMA_SERVER_BIN", "llama.cpp/build/bin/llama-server"),
         internal_port=int(os.environ.get("LLM_INTERNAL_PORT", "8081")),
-        embedding_model=os.environ.get("LLM_EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5"),
-        embedding_model_code=os.environ.get("LLM_EMBEDDING_MODEL_CODE", "microsoft/codebert-base"),
+        embedding_model=os.environ.get("LLM_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2"),
+        embedding_model_code=os.environ.get("LLM_EMBEDDING_MODEL_CODE", "sentence-transformers/all-MiniLM-L6-v2"),
         vector_backend=os.environ.get("LLM_VECTOR_BACKEND", "qdrant"),
         vector_db_path=os.environ.get("LLM_VECTOR_DB_PATH", "./qdrant_db"),
         vector_collection=os.environ.get("LLM_VECTOR_COLLECTION", "conversations"),

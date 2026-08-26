@@ -128,7 +128,15 @@ Switch via `LLM_VECTOR_BACKEND=qdrant|simple`.
 |---:|---|---|
 | ≤ 5GB | Qwen 2.5 3B Instruct | Q4_K_M |
 | 6–7GB | Qwen 2.5 7B | Q3_K_M |
-| ≥ 8GB | Qwen 2.5 7B | Q4_K_M |
+| 8–9GB | Qwen 2.5 7B | Q4_K_M |
+| 10–11GB | Qwen 2.5 7B / Qwen 2.5 14B | Q6_K / Q3_K_M |
+| 12–13GB | Qwen 2.5 14B | Q4_K_M |
+| 14–17GB | Qwen 2.5 14B / Qwen 2.5 32B | Q6_K / Q3_K_M |
+| 18–21GB | Qwen 2.5 32B / Llama 3.1 70B | Q4_K_M / Q3_K_M |
+| 22–27GB | Qwen 2.5 32B / Llama 3.1 70B | Q6_K / Q4_K_M |
+| 28–36GB | Llama 3.1 70B / Qwen 2.5 32B | Q6_K / Q8_0 |
+| 37–44GB | Llama 3.1 70B | Q8_0 |
+| ≥ 45GB | Llama 3.1 70B | Q8_0 (full KV cache headroom) |
 
 The launcher provides additional models for each tier.
 
@@ -143,6 +151,11 @@ Automatically tries safer configurations based on detected VRAM:
 | 4GB | `8K/128 → 4K/128 → 4K/64` |
 | 6GB | `12K/256 → 8K/256 → 8K/128 → 4K/128` |
 | 8GB | `16K/256 → 12K/256 → 8K/256 → 8K/128 → 4K/128` |
+| 10GB | `20K/256 → 16K/256 → 12K/256 → 8K/256 → 8K/128` |
+| 12GB | `24K/256 → 20K/256 → 16K/256 → 12K/256 → 8K/256` |
+| 16GB | `32K/512 → 24K/512 → 20K/512 → 16K/512 → 12K/256` |
+| 20GB | `32K/512 → 24K/512 → 20K/512 → 16K/512` |
+| 24GB+ | `32K/512` (max context) |
 
 Format: `n_ctx / n_batch`. Failed configs fall back automatically. The `n_ctx` that loads becomes the token budget.
 

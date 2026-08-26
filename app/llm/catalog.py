@@ -44,6 +44,76 @@ MODEL_CATALOG = {
             "repo_id": "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF",
             "filename": "qwen2.5-coder-7b-instruct-q4_k_m.gguf", "size": "~4.7 GB"},
     },
+    "10GB": {
+        "Qwen 2.5 7B (Q6_K - Near-FP16 Quality - ~5.8GB)": {
+            "repo_id": "bartowski/Qwen2.5-7B-Instruct-GGUF",
+            "filename": "Qwen2.5-7B-Instruct-Q6_K.gguf", "size": "~5.8 GB"},
+        "Llama 3.1 8B Instruct (Q6_K - Near-FP16 Quality - ~6.1GB)": {
+            "repo_id": "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF",
+            "filename": "Meta-Llama-3.1-8B-Instruct-Q6_K.gguf", "size": "~6.1 GB"},
+        "Qwen 2.5 14B (Q3_K_M - 14B Model Fits - ~7.9GB)": {
+            "repo_id": "bartowski/Qwen2.5-14B-Instruct-GGUF",
+            "filename": "Qwen2.5-14B-Instruct-Q3_K_M.gguf", "size": "~7.9 GB"},
+    },
+    "12GB": {
+        "Qwen 2.5 14B (Q4_K_M - Strong 14B General & Code - ~9.1GB)": {
+            "repo_id": "bartowski/Qwen2.5-14B-Instruct-GGUF",
+            "filename": "Qwen2.5-14B-Instruct-Q4_K_M.gguf", "size": "~9.1 GB"},
+        "Llama 3.1 8B Instruct (Q8_0 - Maximum 8B Accuracy - ~8.3GB)": {
+            "repo_id": "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF",
+            "filename": "Meta-Llama-3.1-8B-Instruct-Q8_0.gguf", "size": "~8.3 GB"},
+        "Nemotron 3 Ultra 8B (Q4_K_M - NVIDIA Reasoning Model - ~4.9GB)": {
+            "repo_id": "bartowski/Nemotron-3-Ultra-8B-GGUF",
+            "filename": "Nemotron-3-Ultra-8B-Q4_K_M.gguf", "size": "~4.9 GB"},
+    },
+    "16GB": {
+        "Qwen 2.5 14B (Q6_K - Near-FP16 14B - ~11.2GB)": {
+            "repo_id": "bartowski/Qwen2.5-14B-Instruct-GGUF",
+            "filename": "Qwen2.5-14B-Instruct-Q6_K.gguf", "size": "~11.2 GB"},
+        "Llama 3.1 8B Instruct (Q8_0 + Headroom - ~8.3GB)": {
+            "repo_id": "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF",
+            "filename": "Meta-Llama-3.1-8B-Instruct-Q8_0.gguf", "size": "~8.3 GB"},
+        "Qwen 2.5 32B (Q3_K_M - 32B Model Fits - ~18.9GB)": {
+            "repo_id": "bartowski/Qwen2.5-32B-Instruct-GGUF",
+            "filename": "Qwen2.5-32B-Instruct-Q3_K_M.gguf", "size": "~18.9 GB"},
+    },
+    "20GB": {
+        "Qwen 2.5 32B (Q4_K_M - Strong 32B Reasoning - ~18.9GB)": {
+            "repo_id": "bartowski/Qwen2.5-32B-Instruct-GGUF",
+            "filename": "Qwen2.5-32B-Instruct-Q4_K_M.gguf", "size": "~18.9 GB"},
+        "Llama 3.1 70B (Q3_K_M - 70B Model Fits - ~19.5GB)": {
+            "repo_id": "bartowski/Meta-Llama-3.1-70B-Instruct-GGUF",
+            "filename": "Meta-Llama-3.1-70B-Instruct-Q3_K_M.gguf", "size": "~19.5 GB"},
+        "Nemotron 3 Ultra 8B (Q8_0 - Best 8B Quality - ~8.3GB)": {
+            "repo_id": "bartowski/Nemotron-3-Ultra-8B-GGUF",
+            "filename": "Nemotron-3-Ultra-8B-Q8_0.gguf", "size": "~8.3 GB"},
+    },
+    "24GB": {
+        "Qwen 2.5 32B (Q6_K - Near-FP16 32B - ~23GB)": {
+            "repo_id": "bartowski/Qwen2.5-32B-Instruct-GGUF",
+            "filename": "Qwen2.5-32B-Instruct-Q6_K.gguf", "size": "~23 GB"},
+        "Llama 3.1 70B (Q4_K_M - Strong 70B General - ~23GB)": {
+            "repo_id": "bartowski/Meta-Llama-3.1-70B-Instruct-GGUF",
+            "filename": "Meta-Llama-3.1-70B-Instruct-Q4_K_M.gguf", "size": "~23 GB"},
+    },
+    "32GB": {
+        "Llama 3.1 70B (Q6_K - Near-FP16 70B - ~29GB)": {
+            "repo_id": "bartowski/Meta-Llama-3.1-70B-Instruct-GGUF",
+            "filename": "Meta-Llama-3.1-70B-Instruct-Q6_K.gguf", "size": "~29 GB"},
+        "Qwen 2.5 32B (Q8_0 - Maximum 32B Quality - ~27GB)": {
+            "repo_id": "bartowski/Qwen2.5-32B-Instruct-GGUF",
+            "filename": "Qwen2.5-32B-Instruct-Q8_0.gguf", "size": "~27 GB"},
+    },
+    "40GB": {
+        "Llama 3.1 70B (Q8_0 - Maximum 70B Quality - ~38GB)": {
+            "repo_id": "bartowski/Meta-Llama-3.1-70B-Instruct-GGUF",
+            "filename": "Meta-Llama-3.1-70B-Instruct-Q8_0.gguf", "size": "~38 GB"},
+    },
+    "48GB": {
+        "Llama 3.1 70B (Q8_0 + KV Cache Headroom - ~38GB)": {
+            "repo_id": "bartowski/Meta-Llama-3.1-70B-Instruct-GGUF",
+            "filename": "Meta-Llama-3.1-70B-Instruct-Q8_0.gguf", "size": "~38 GB"},
+    },
 }
 
 
