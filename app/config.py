@@ -68,6 +68,12 @@ class Settings:
     rag_dedup_threshold: float = 0.85   # Cosine similarity threshold for deduplication
     rag_dedup_enabled: bool = True      # Enable/disable semantic deduplication
 
+    # Multi-agent orchestration settings
+    orchestrator_enabled: bool = True           # Enable multi-agent orchestration
+    orchestrator_planning: bool = True          # Enable automatic planning for complex tasks
+    orchestrator_review: bool = True            # Enable output review for quality
+    orchestrator_force_agent: str = ""          # Force specific agent: planner/coder/researcher/reviewer/general
+
 
 def load_settings() -> Settings:
     api_key = os.environ.get("LLM_API_KEY")
@@ -115,6 +121,10 @@ def load_settings() -> Settings:
         final_response_temperature=float(os.environ.get("LLM_FINAL_RESPONSE_TEMPERATURE", "0.7")),
         rag_dedup_threshold=float(os.environ.get("LLM_RAG_DEDUP_THRESHOLD", "0.85")),
         rag_dedup_enabled=os.environ.get("LLM_RAG_DEDUP_ENABLED", "true").lower() == "true",
+        orchestrator_enabled=os.environ.get("LLM_ORCHESTRATOR_ENABLED", "true").lower() == "true",
+        orchestrator_planning=os.environ.get("LLM_ORCHESTRATOR_PLANNING", "true").lower() == "true",
+        orchestrator_review=os.environ.get("LLM_ORCHESTRATOR_REVIEW", "true").lower() == "true",
+        orchestrator_force_agent=os.environ.get("LLM_ORCHESTRATOR_FORCE_AGENT", ""),
     )
 
 

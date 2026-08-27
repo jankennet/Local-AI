@@ -18,6 +18,7 @@ os.environ.setdefault("LLM_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L
 os.environ.setdefault("LLM_EMBEDDING_MODEL_CODE", "sentence-transformers/all-MiniLM-L6-v2")
 os.environ.setdefault("LLM_VECTOR_BACKEND", "simple")
 os.environ.setdefault("LLM_RERANKER_ENABLED", "false")
+os.environ.setdefault("LLM_ORCHESTRATOR_ENABLED", "false")
 
 
 @pytest.fixture

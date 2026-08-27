@@ -16,6 +16,7 @@ from ..models.schemas import (
 from ..sessions.store import SessionStore
 from ..llm.completion_client import CompletionClient
 from ..llm.agent_loop import run_agent_turn
+from ..llm.agents import get_orchestrator, AgentType
 from ..metrics import (
     record_session_created, record_session_deleted, record_session_expired,
     set_session_tokens, remove_session_metrics,
@@ -62,31 +63,75 @@ def build_sessions_router(
             raise HTTPException(status_code=404, detail="unknown session_id")
 
         store.add_turn(session_id, "user", req.message)
-        # run_agent_turn persists every step itself (assistant tool_calls,
-        # tool results, and the final assistant reply) — don't add_turn again here.
-        reply = await run_agent_turn(
-            store,
-            session_id,
-            completion_client,
-            tools,
-            max_tokens=req.max_tokens,
-            temperature=req.temperature,
-            rag_query=req.message,
-            tool_timeout=tool_timeout_seconds,
-            max_retries=tool_max_retries,
-            rag_top_k=settings.rag_top_k,
-            rag_initial_k=settings.rag_initial_k,
-            use_reranker=settings.reranker_enabled,
-        )
 
-        # Update session token metrics
-        set_session_tokens(session_id, store.tokens_used(session_id), store.budget)
+        # Use orchestrator if enabled, otherwise fall back to legacy agent_loop
+        if settings.orchestrator_enabled:
+            orchestrator = get_orchestrator()
+            orchestrator.configure(
+                enable_planning=settings.orchestrator_planning,
+                enable_review=settings.orchestrator_review,
+            )
 
-        return ChatResponse(
-            session_id=session_id,
-            reply=reply,
-            context_used=store.tokens_used(session_id),
-            context_limit=store.budget,
-        )
+            force_agent = None
+            if settings.orchestrator_force_agent:
+                try:
+                    force_agent = AgentType(settings.orchestrator_force_agent.lower())
+                except ValueError:
+                    pass  # Invalid agent type, use auto-classification
+
+            from ..llm.agents import AgentContext
+            context = AgentContext(
+                session_id=session_id,
+                query=req.message,
+                store=store,
+                completion_client=completion_client,
+                tools=tools,
+                max_tokens=req.max_tokens,
+                temperature=req.temperature,
+                rag_top_k=settings.rag_top_k,
+                rag_initial_k=settings.rag_initial_k,
+                use_reranker=settings.reranker_enabled,
+                tool_timeout=tool_timeout_seconds,
+                max_retries=tool_max_retries,
+            )
+
+            result = await orchestrator.execute(context, force_agent=force_agent)
+            reply = result.final_reply
+
+            # Update session token metrics
+            set_session_tokens(session_id, store.tokens_used(session_id), store.budget)
+
+            return ChatResponse(
+                session_id=session_id,
+                reply=reply,
+                context_used=store.tokens_used(session_id),
+                context_limit=store.budget,
+            )
+        else:
+            # Legacy path
+            reply = await run_agent_turn(
+                store,
+                session_id,
+                completion_client,
+                tools,
+                max_tokens=req.max_tokens,
+                temperature=req.temperature,
+                rag_query=req.message,
+                tool_timeout=tool_timeout_seconds,
+                max_retries=tool_max_retries,
+                rag_top_k=settings.rag_top_k,
+                rag_initial_k=settings.rag_initial_k,
+                use_reranker=settings.reranker_enabled,
+            )
+
+            # Update session token metrics
+            set_session_tokens(session_id, store.tokens_used(session_id), store.budget)
+
+            return ChatResponse(
+                session_id=session_id,
+                reply=reply,
+                context_used=store.tokens_used(session_id),
+                context_limit=store.budget,
+            )
 
     return router
