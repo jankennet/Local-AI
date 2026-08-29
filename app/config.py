@@ -27,6 +27,7 @@ class Settings:
     port: int = 8000
     models_dir: str = "models"
     sessions_file: str = "sessions.json"
+    session_repository: str = "json"  # "json" or "sqlite"
     reserve_for_response: int = 768
     reserve_for_response_min: int = 256      # Minimum reserve for short queries
     reserve_for_response_max: int = 2048     # Maximum reserve for complex queries
@@ -91,6 +92,7 @@ def load_settings() -> Settings:
         port=int(os.environ.get("LLM_PORT", "8000")),
         models_dir=os.environ.get("LLM_MODELS_DIR", "models"),
         sessions_file=os.environ.get("LLM_SESSIONS_FILE", "sessions.json"),
+        session_repository=os.environ.get("LLM_SESSION_REPOSITORY", "json"),
         reserve_for_response=int(os.environ.get("LLM_RESERVE_FOR_RESPONSE", "768")),
         reserve_for_response_min=int(os.environ.get("LLM_RESERVE_FOR_RESPONSE_MIN", "256")),
         reserve_for_response_max=int(os.environ.get("LLM_RESERVE_FOR_RESPONSE_MAX", "2048")),

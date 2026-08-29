@@ -26,7 +26,7 @@ from fastapi import FastAPI, Request
 from .config import settings
 from .cleanup import periodic_cleanup
 from .tokenizer import LlamaVocabTokenCounter
-from .sessions.repository import JSONSessionRepository
+from .sessions.repository import JSONSessionRepository, SQLiteSessionRepository
 from .sessions.eviction import SummarizeOldestStrategy
 from .sessions.store import SessionStore
 from .embeddings import EmbeddingService, create_vector_store
@@ -77,7 +77,7 @@ def create_app() -> FastAPI:
     model_path, vram_tier = resolve_model_path()
     
     # Create log buffer for llama-server output
-    log_buffer = LogBuffer(max_lines=100)
+    log_buffer = LogBuffer(max_lines=100, tee=True)
     set_log_buffer(log_buffer)
     
     process, base_url, selected_config = launch_llama_server(
@@ -87,10 +87,16 @@ def create_app() -> FastAPI:
     kv_note = "q8_0 (quantized)" if selected_config["kv_quant"] else "f16 (default)"
     print(f"Native llama-server ready at {base_url} — n_ctx={selected_config['n_ctx']}, "
           f"n_batch={selected_config['n_batch']}, kv_cache={kv_note}")
-    print("Llama-server logs captured to rolling buffer (last 100 lines). Errors will dump buffer.")
+    print("Llama-server logs streaming to console (tee mode enabled).")
 
     counter = LlamaVocabTokenCounter(model_path)
-    repository = JSONSessionRepository(settings.sessions_file)
+    
+    # Create session repository based on configuration
+    if settings.session_repository == "sqlite":
+        repository = SQLiteSessionRepository(settings.sessions_file.replace(".json", ".db"))
+    else:
+        repository = JSONSessionRepository(settings.sessions_file)
+    
     eviction = SummarizeOldestStrategy()
     embedding_service = EmbeddingService(settings.embedding_model_code)
     vector_store_factory = lambda es: create_vector_store(

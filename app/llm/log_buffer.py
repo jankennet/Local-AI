@@ -2,9 +2,11 @@
 log_buffer.py
 
 Thread-safe rolling buffer for llama-server stdout/stderr.
-Captures last N lines for error dumping.
+Captures last N lines for error dumping. Also supports tee mode
+to print logs to console in real-time.
 """
 
+import sys
 import threading
 from collections import deque
 from typing import Optional
@@ -16,15 +18,20 @@ logger = logging.getLogger(__name__)
 class LogBuffer:
     """Thread-safe rolling buffer for log lines."""
     
-    def __init__(self, max_lines: int = 100):
+    def __init__(self, max_lines: int = 100, tee: bool = False, output_stream=None):
         self._buffer = deque(maxlen=max_lines)
         self._lock = threading.Lock()
         self._max_lines = max_lines
+        self._tee = tee
+        self._output = output_stream or sys.stdout
     
     def add(self, line: str) -> None:
-        """Add a line to the buffer."""
+        """Add a line to the buffer, optionally printing to console."""
         with self._lock:
             self._buffer.append(line.rstrip("\n"))
+        
+        if self._tee:
+            print(line, file=self._output, flush=True)
     
     def get_lines(self, n: Optional[int] = None) -> list[str]:
         """Get last N lines (or all if N is None)."""
