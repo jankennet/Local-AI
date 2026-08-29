@@ -270,17 +270,18 @@ class TestAgentLoopIntegration:
     @pytest.mark.asyncio
     async def test_run_agent_turn_no_tools(self, mock_tokenizer, mock_embedding_service, temp_dir):
         """Test agent turn without tool calls."""
+        from unittest.mock import AsyncMock
         from app.sessions.store import SessionStore
         from app.sessions.repository import JSONSessionRepository
         from app.sessions.eviction import SummarizeOldestStrategy
         from app.llm.completion_client import CompletionClient
         
-        # Mock completion client
-        mock_client = MagicMock(spec=CompletionClient)
-        mock_client.complete_with_tools.return_value = {
-            "content": "Hello! How can I help?",
-            "tool_calls": None,
-        }
+        # Mock completion client (async)
+        mock_client = AsyncMock(spec=CompletionClient)
+        mock_client.complete_with_tools.side_effect = [
+            {"content": "Hello! How can I help?", "tool_calls": None},  # First call: tool check
+            {"content": "Hello! How can I help?", "tool_calls": None},  # Second call: final response
+        ]
         
         repo = JSONSessionRepository(str(temp_dir / "sessions.json"))
         store = SessionStore(
@@ -303,4 +304,4 @@ class TestAgentLoopIntegration:
         )
         
         assert reply == "Hello! How can I help?"
-        mock_client.complete_with_tools.assert_called_once()
+        assert mock_client.complete_with_tools.call_count == 2

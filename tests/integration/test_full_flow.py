@@ -179,9 +179,10 @@ class TestToolFlow:
         
         mock_client = MagicMock(spec=CompletionClient)
         # First call returns tool call, second returns final answer
-        def side_effect(messages, tool_schemas, max_tokens, temperature):
-            call_count = side_effect.call_count
-            side_effect.call_count += 1
+        call_count = 0
+        async def side_effect(messages, tool_schemas, max_tokens, temperature):
+            nonlocal call_count
+            call_count += 1
             if call_count == 1:
                 return {
                     "content": "",
@@ -195,7 +196,6 @@ class TestToolFlow:
                     "content": "File created successfully.",
                     "tool_calls": None,
                 }
-        side_effect.call_count = 1
         mock_client.complete_with_tools = side_effect
         
         from app.llm.agent_loop import run_agent_turn
@@ -209,7 +209,7 @@ class TestToolFlow:
         )
         
         assert "File created" in reply
-        assert side_effect.call_count == 3
+        assert call_count == 3  # tool check -> tool execution -> final response
         
         # Check file was written
         import os
@@ -221,9 +221,10 @@ class TestToolFlow:
         from app.llm.completion_client import CompletionClient
         
         mock_client = MagicMock(spec=CompletionClient)
-        def side_effect(messages, tool_schemas, max_tokens, temperature):
-            call_count = side_effect.call_count
-            side_effect.call_count += 1
+        call_count = 0
+        async def side_effect(messages, tool_schemas, max_tokens, temperature):
+            nonlocal call_count
+            call_count += 1
             if call_count == 1:
                 return {
                     "content": "",
@@ -237,7 +238,6 @@ class TestToolFlow:
                     "content": "Command completed with error.",
                     "tool_calls": None,
                 }
-        side_effect.call_count = 1
         mock_client.complete_with_tools = side_effect
         
         from app.llm.agent_loop import run_agent_turn
@@ -282,7 +282,10 @@ class TestDynamicReserve:
         mock_client = MagicMock(spec=CompletionClient)
         captured_max_tokens = []
         
-        def capture_max_tokens(messages, tool_schemas, max_tokens, temperature):
+        call_count = 0
+        async def capture_max_tokens(messages, tool_schemas, max_tokens, temperature):
+            nonlocal call_count
+            call_count += 1
             captured_max_tokens.append(max_tokens)
             return {"content": "Response", "tool_calls": None}
         

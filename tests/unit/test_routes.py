@@ -26,8 +26,11 @@ class TestSessionsRouter:
         from app.sessions.eviction import SummarizeOldestStrategy
         from app.llm.completion_client import CompletionClient
         
-        # Mock completion client - synchronous like the real one
-        def mock_complete_with_tools(messages, tool_schemas, max_tokens, temperature):
+        # Mock completion client - async now
+        call_count = 0
+        async def mock_complete_with_tools(messages, tool_schemas, max_tokens, temperature):
+            nonlocal call_count
+            call_count += 1
             return {
                 "content": "Test response",
                 "tool_calls": None,

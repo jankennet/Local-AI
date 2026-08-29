@@ -27,6 +27,8 @@ class TestAuth:
         import importlib
         import app.config
         importlib.reload(app.config)
+        import app.auth_keys
+        importlib.reload(app.auth_keys)
         import app.auth
         importlib.reload(app.auth)
         return app.auth.verify_api_key
@@ -42,9 +44,26 @@ class TestAuth:
         
         client = TestClient(app)
         
-        response = client.get("/test", headers={"X-API-Key": "expected-key"})
-        assert response.status_code == 200
-        assert response.json()["validated"] is True
+        # Need to create a valid key in the store first
+        from app.auth_keys import init_key_store, Scope
+        import tempfile
+        import os
+        
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+            f.write('{}')
+            temp_path = f.name
+        
+        try:
+            store = init_key_store(temp_path)
+            plaintext, _ = store.create_key(
+                name="test",
+                scopes=[Scope.READ, Scope.WRITE],
+            )
+            response = client.get("/test", headers={"X-API-Key": plaintext})
+            assert response.status_code == 200
+            assert response.json()["validated"] is True
+        finally:
+            os.unlink(temp_path)
 
     def test_verify_api_key_invalid(self, monkeypatch):
         self._setup_auth(monkeypatch, "expected-key")
@@ -57,6 +76,7 @@ class TestAuth:
         
         client = TestClient(app)
         
+        # Invalid key format
         response = client.get("/test", headers={"X-API-Key": "wrong-key"})
         assert response.status_code == 401
 
