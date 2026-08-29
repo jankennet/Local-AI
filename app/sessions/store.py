@@ -20,7 +20,7 @@ from .session import Session
 from .repository import SessionRepository
 from .eviction import EvictionStrategy, _session_tokens
 from ..tokenizer import TokenCounter
-from ..embeddings import EmbeddingService, VectorStore
+from ..embeddings import EmbeddingService, VectorStore, deduplicate_tool_history
 from ..metrics import set_session_tokens
 
 logger = logging.getLogger(__name__)
@@ -91,6 +91,14 @@ class SessionStore:
         s.last_active = time.time()
         if self._embedding_service:
             s.add_to_vector_store(role, content, turn_index)
+        
+        # Deduplicate tool history if this is a tool message
+        if role == "tool" and self._embedding_service:
+            s.history = deduplicate_tool_history(
+                s.history,
+                embedding_service=self._embedding_service,
+            )
+        
         self._eviction.evict(s, self._counter, self.budget)
         if self._embedding_service:
             s.init_vector_store(self._embedding_service, self._vector_store_factory)

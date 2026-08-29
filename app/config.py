@@ -72,7 +72,7 @@ class Settings:
     orchestrator_enabled: bool = True           # Enable multi-agent orchestration
     orchestrator_planning: bool = True          # Enable automatic planning for complex tasks
     orchestrator_review: bool = True            # Enable output review for quality
-    orchestrator_force_agent: str = ""          # Force specific agent: planner/coder/researcher/reviewer/general
+    orchestrator_force_agent: str = ""          # Force specific agent: planner/code_reader/code_writer/researcher/reviewer/general
 
 
 def load_settings() -> Settings:

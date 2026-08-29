@@ -12,6 +12,7 @@ batched version, or a remote tokenizer service), implement TokenCounter
 and nothing else in the app needs to change (DIP).
 """
 
+from functools import lru_cache
 from typing import Protocol
 
 
@@ -25,8 +26,20 @@ class LlamaVocabTokenCounter:
     def __init__(self, model_path: str):
         from llama_cpp import Llama
         self._vocab = Llama(model_path=model_path, vocab_only=True, verbose=False)
+        self._count_cache = lru_cache(maxsize=1024)(self._count_uncached)
 
-    def count(self, text: str) -> int:
+    def _count_uncached(self, text: str) -> int:
         if not text:
             return 0
         return len(self._vocab.tokenize(text.encode("utf-8")))
+
+    def count(self, text: str) -> int:
+        return self._count_cache(text)
+
+    def clear_cache(self) -> None:
+        """Clear the token count cache."""
+        self._count_cache.cache_clear()
+
+    def cache_info(self) -> str:
+        """Return cache statistics."""
+        return str(self._count_cache.cache_info())

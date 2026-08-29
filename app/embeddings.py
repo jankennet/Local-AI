@@ -136,6 +136,91 @@ def deduplicate_results(
     return [results[i] for i in range(len(results)) if keep[i]]
 
 
+def deduplicate_tool_history(
+    history: list,
+    threshold: float = 0.85,
+    embedding_service: Optional["EmbeddingService"] = None,
+    max_tool_turns: int = 20,
+) -> list:
+    """
+    Remove semantically duplicate tool calls from session history.
+    
+    Args:
+        history: List of message dicts with role, content, and extra metadata
+        threshold: Cosine similarity threshold for deduplication
+        embedding_service: EmbeddingService for computing embeddings
+        max_tool_turns: Maximum number of tool turns to consider (most recent)
+    
+    Returns:
+        Filtered history with duplicate tool calls removed
+    """
+    if not history or len(history) <= 1 or embedding_service is None:
+        return history
+    
+    # Extract tool turns with their indices
+    tool_turns = []
+    for i, msg in enumerate(history):
+        if msg.get("role") == "tool":
+            tool_turns.append((i, msg))
+    
+    if len(tool_turns) <= 1:
+        return history
+    
+    # Only consider most recent tool turns to avoid O(n^2) on long histories
+    tool_turns = tool_turns[-max_tool_turns:]
+    
+    # Build text representations for comparison
+    tool_texts = []
+    for idx, msg in tool_turns:
+        # Use tool name + content for comparison
+        tool_name = msg.get("name", "unknown")
+        content = msg.get("content", "")
+        tool_texts.append(f"{tool_name}: {content}")
+    
+    try:
+        embeddings = embedding_service.embed(tool_texts)
+        
+        # Normalize embeddings for cosine similarity
+        norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+        norms[norms == 0] = 1
+        normalized = embeddings / norms
+        
+        # Compute pairwise similarity matrix
+        sim_matrix = np.dot(normalized, normalized.T)
+        
+        # Keep track of which tool turns to keep
+        keep_indices = set(range(len(history)))  # All non-tool messages kept by default
+        tool_keep = [True] * len(tool_turns)
+        
+        for i in range(len(tool_turns)):
+            if not tool_keep[i]:
+                continue
+            for j in range(i + 1, len(tool_turns)):
+                if not tool_keep[j]:
+                    continue
+                if sim_matrix[i, j] >= threshold:
+                    # Keep the more recent one (higher index in original history)
+                    # Since we process from oldest to newest in tool_turns, keep j (newer)
+                    tool_keep[i] = False
+                    break
+        
+        # Build filtered history
+        filtered = []
+        tool_idx = 0
+        for i, msg in enumerate(history):
+            if msg.get("role") == "tool":
+                if tool_idx < len(tool_keep) and tool_keep[tool_idx]:
+                    filtered.append(msg)
+                tool_idx += 1
+            else:
+                filtered.append(msg)
+        
+        return filtered
+    except Exception:
+        # On any error, return original history
+        return history
+
+
 class EmbeddingService:
     """Thread-safe local embeddings. Loads model once (lazy) per model name."""
 

@@ -24,11 +24,21 @@ class QueryClassifier:
     """Classifies queries to determine the best agent for the task."""
 
     # Patterns that strongly indicate specific agent types
-    CODER_PATTERNS = [
-        r"\b(write|create|build|implement|add|refactor|fix|debug|optimize)\b.*\b(code|function|class|script|api|endpoint|database|sql)\b",
-        r"\b(bug|error|exception|traceback|fail|crash)\b",
-        r"\b(test|testing|unit test|pytest)\b",
-        r"\b(read|edit|modify|update|change)\b.*\b(file|code|script)\b",
+    CODE_READER_PATTERNS = [
+        r"\b(read|show|view|display|print|cat|examine|inspect|look at)\b.*\b(file|code|script|function|class)\b",
+        r"\b(explain|understand|analyze|describe|how does|what does|walk through)\b.*\b(code|function|class|module)\b",
+        r"\b(find|search|locate|where is)\b.*\b(function|class|variable|bug|error)\b",
+        r"\b(list|show|tree|structure)\b.*\b(directory|folder|project|files)\b",
+        r"\b(debug|trace|investigate)\b.*\b(issue|problem|error|bug)\b",
+    ]
+
+    CODE_WRITER_PATTERNS = [
+        r"\b(write|create|build|implement|add|generate|scaffold)\b.*\b(code|function|class|script|api|endpoint|test)\b",
+        r"\b(refactor|rewrite|restructure|reorganize|optimize|improve)\b.*\b(code|function|class|module)\b",
+        r"\b(fix|repair|patch|resolve|correct)\b.*\b(bug|error|issue|problem)\b",
+        r"\b(edit|modify|update|change|replace|rename)\b.*\b(file|code|function|class)\b",
+        r"\b(delete|remove|clean up)\b.*\b(code|function|file|dead code)\b",
+        r"\b(test|testing|unit test|pytest)\b.*\b(write|create|add|generate)\b",
         r"\b(git|commit|push|pull|merge|branch)\b",
         r"\b(docker|kubernetes|k8s|deploy|ci/cd|pipeline)\b",
         r"\b(run|execute|install|package|dependency)\b",
@@ -58,7 +68,8 @@ class QueryClassifier:
 
     def __init__(self):
         self._compiled_patterns = {
-            AgentType.CODER: [re.compile(p, re.IGNORECASE) for p in self.CODER_PATTERNS],
+            AgentType.CODE_READER: [re.compile(p, re.IGNORECASE) for p in self.CODE_READER_PATTERNS],
+            AgentType.CODE_WRITER: [re.compile(p, re.IGNORECASE) for p in self.CODE_WRITER_PATTERNS],
             AgentType.RESEARCHER: [re.compile(p, re.IGNORECASE) for p in self.RESEARCHER_PATTERNS],
             AgentType.PLANNER: [re.compile(p, re.IGNORECASE) for p in self.PLANNER_PATTERNS],
             AgentType.REVIEWER: [re.compile(p, re.IGNORECASE) for p in self.REVIEWER_PATTERNS],
@@ -79,7 +90,16 @@ class QueryClassifier:
         # Boost for explicit agent mentions
         query_lower = query.lower()
         if any(w in query_lower for w in ["code", "program", "develop", "script", "function", "class", "api"]):
-            scores[AgentType.CODER] += 0.5
+            # Distinguish read vs write intent
+            write_indicators = ["write", "create", "build", "implement", "add", "fix", "refactor", "edit", "modify", "update", "change", "delete", "remove", "generate", "scaffold"]
+            read_indicators = ["read", "show", "view", "explain", "understand", "analyze", "find", "search", "list", "debug", "trace"]
+            if any(w in query_lower for w in write_indicators):
+                scores[AgentType.CODE_WRITER] += 0.7
+            elif any(w in query_lower for w in read_indicators):
+                scores[AgentType.CODE_READER] += 0.7
+            else:
+                # Default to reader for ambiguous code queries (safer)
+                scores[AgentType.CODE_READER] += 0.3
         if any(w in query_lower for w in ["research", "investigate", "explore", "analyze"]):
             scores[AgentType.RESEARCHER] += 0.5
         if any(w in query_lower for w in ["plan", "design", "architect"]):
@@ -91,7 +111,11 @@ class QueryClassifier:
         if session_context:
             context_lower = session_context.lower()
             if any(w in context_lower for w in ["code", "function", "class", "bug", "error", "test"]):
-                scores[AgentType.CODER] += 0.3
+                # Check recent context for read vs write
+                if any(w in context_lower for w in ["write", "create", "fix", "refactor", "edit", "modify", "implement"]):
+                    scores[AgentType.CODE_WRITER] += 0.3
+                else:
+                    scores[AgentType.CODE_READER] += 0.3
             if any(w in context_lower for w in ["research", "analyze", "compare", "document"]):
                 scores[AgentType.RESEARCHER] += 0.3
 
@@ -109,7 +133,7 @@ class QueryClassifier:
 
         # Check if planning is needed (complex task)
         requires_planning = (
-            best_agent in (AgentType.CODER, AgentType.RESEARCHER)
+            best_agent in (AgentType.CODE_READER, AgentType.CODE_WRITER, AgentType.RESEARCHER)
             and best_score > 1.5
             and any(len(q.split()) > 15 for q in [query])
         )

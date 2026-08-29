@@ -21,6 +21,8 @@ logger = logging.getLogger(__name__)
 class AgentType(Enum):
     PLANNER = "planner"
     CODER = "coder"
+    CODE_READER = "code_reader"
+    CODE_WRITER = "code_writer"
     RESEARCHER = "researcher"
     REVIEWER = "reviewer"
     GENERAL = "general"
@@ -41,6 +43,11 @@ class AgentContext:
     tool_timeout: float = 30.0
     max_retries: int = 2
     metadata: dict = field(default_factory=dict)
+    # Budget-aware fields
+    token_budget: int = 4096          # Total token budget for this agent execution
+    tokens_used: int = 0              # Tokens consumed so far
+    max_tool_calls: int = 20          # Hard limit on tool calls
+    max_rounds: int = 12              # Hard limit on rounds
 
 
 @dataclass
@@ -108,13 +115,32 @@ class BaseAgent(ABC):
         tool_schemas: list,
         max_rounds: int = 8,
     ) -> tuple[str, int, int]:
-        """Run the tool-calling loop. Returns (final_reply, rounds_used, tool_calls_made)."""
+        """Run the tool-calling loop with budget awareness. Returns (final_reply, rounds_used, tool_calls_made)."""
         rounds_used = 0
         tool_calls_made = 0
 
-        for round_num in range(max_rounds):
+        # Use context's budget limits if set, otherwise fall back to parameter
+        effective_max_rounds = context.max_rounds if context.max_rounds > 0 else max_rounds
+        effective_max_tool_calls = context.max_tool_calls if context.max_tool_calls > 0 else 20
+
+        for round_num in range(effective_max_rounds):
             rounds_used += 1
             record_agent_turn(context.session_id, f"{self.agent_type.value}_round")
+
+            # Check budget before making another round
+            if context.tokens_used >= context.token_budget:
+                logger.warning(f"Agent {self.agent_type.value}: token budget exceeded ({context.tokens_used}/{context.token_budget})")
+                reply = "Token budget exhausted. Stopping early."
+                context.store.add_turn(context.session_id, "assistant", reply)
+                record_agent_turn(context.session_id, "assistant")
+                return reply, rounds_used, tool_calls_made
+
+            if tool_calls_made >= effective_max_tool_calls:
+                logger.warning(f"Agent {self.agent_type.value}: tool call limit reached ({tool_calls_made}/{effective_max_tool_calls})")
+                reply = "Tool call limit reached. Stopping early."
+                context.store.add_turn(context.session_id, "assistant", reply)
+                record_agent_turn(context.session_id, "assistant")
+                return reply, rounds_used, tool_calls_made
 
             current_temperature = settings.tool_call_temperature
 
@@ -127,6 +153,8 @@ class BaseAgent(ABC):
                 reply = message.get("content") or ""
                 context.store.add_turn(context.session_id, "assistant", reply)
                 record_agent_turn(context.session_id, "assistant")
+                # Estimate tokens for the reply
+                context.tokens_used += context.store._counter.count(reply) if hasattr(context.store, '_counter') else len(reply) // 4
                 return reply, rounds_used, tool_calls_made
 
             context.store.add_turn(
@@ -144,11 +172,22 @@ class BaseAgent(ABC):
                     context.session_id, "tool", result, tool_call_id=call["id"]
                 )
                 record_agent_turn(context.session_id, "tool")
+                # Track token usage from tool results
+                if hasattr(context.store, '_counter'):
+                    context.tokens_used += context.store._counter.count(result)
+                else:
+                    context.tokens_used += len(result) // 4
 
             messages = context.store.build_messages(
                 context.session_id,
                 use_rag=False,
             )
+
+            # Track token usage for the message history
+            if hasattr(context.store, '_counter'):
+                for msg in messages:
+                    if msg.get("content"):
+                        context.tokens_used += context.store._counter.count(msg["content"])
 
         return (
             "Stopped after too many tool calls — try breaking the task into smaller steps.",

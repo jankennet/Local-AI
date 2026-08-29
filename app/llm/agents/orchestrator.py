@@ -9,7 +9,8 @@ from typing import Optional
 from .base import AgentContext, AgentResult, AgentType
 from .classifier import ClassificationResult, get_classifier
 from .planner import PlannerAgent
-from .coder import CoderAgent
+from .code_reader import CodeReaderAgent
+from .code_writer import CodeWriterAgent
 from .researcher import ResearcherAgent
 from .reviewer import ReviewerAgent
 from .general import GeneralAgent
@@ -39,7 +40,8 @@ class AgentOrchestrator:
     def __init__(self):
         self._agents = {
             AgentType.PLANNER: PlannerAgent(),
-            AgentType.CODER: CoderAgent(),
+            AgentType.CODE_READER: CodeReaderAgent(),
+            AgentType.CODE_WRITER: CodeWriterAgent(),
             AgentType.RESEARCHER: ResearcherAgent(),
             AgentType.REVIEWER: ReviewerAgent(),
             AgentType.GENERAL: GeneralAgent(),
@@ -78,6 +80,8 @@ class AgentOrchestrator:
         # Step 1: Planning (for complex tasks)
         if self._enable_planning and classification.requires_planning and primary_agent_type != AgentType.PLANNER:
             logger.info("Orchestrator: invoking Planner for task decomposition")
+            # Allocate 15% of budget to planning
+            plan_budget = int(context.token_budget * 0.15) if context.token_budget > 0 else 1024
             planner_context = AgentContext(
                 session_id=context.session_id,
                 query=f"Create a detailed execution plan for: {context.query}",
@@ -91,6 +95,9 @@ class AgentOrchestrator:
                 use_reranker=context.use_reranker,
                 tool_timeout=context.tool_timeout,
                 max_retries=context.max_retries,
+                token_budget=plan_budget,
+                max_tool_calls=5,
+                max_rounds=4,
             )
             planner_result = await self._agents[AgentType.PLANNER].execute(planner_context)
             agents_used.append(AgentType.PLANNER)
@@ -99,6 +106,8 @@ class AgentOrchestrator:
             # Augment the original query with the plan
             context.query = f"{context.query}\n\n## Execution Plan\n{planner_result.reply}"
             context.metadata["plan"] = planner_result.reply
+            # Deduct planning tokens from main budget
+            context.token_budget = max(0, context.token_budget - planner_context.tokens_used)
 
         # Step 2: Execute with primary agent
         logger.info(f"Orchestrator: executing with {primary_agent_type.value} agent")
@@ -110,10 +119,12 @@ class AgentOrchestrator:
         # Step 3: Review (if enabled and not a simple task)
         if (
             self._enable_review
-            and primary_agent_type in (AgentType.CODER, AgentType.RESEARCHER, AgentType.PLANNER)
+            and primary_agent_type in (AgentType.CODE_READER, AgentType.CODE_WRITER, AgentType.RESEARCHER, AgentType.PLANNER)
             and not force_agent  # Don't review if user explicitly chose an agent
         ):
             logger.info("Orchestrator: invoking Reviewer for quality check")
+            # Allocate 10% of remaining budget to review
+            review_budget = int(context.token_budget * 0.10) if context.token_budget > 0 else 512
             review_context = AgentContext(
                 session_id=context.session_id,
                 query=(
@@ -131,6 +142,9 @@ class AgentOrchestrator:
                 use_reranker=context.use_reranker,
                 tool_timeout=context.tool_timeout,
                 max_retries=context.max_retries,
+                token_budget=review_budget,
+                max_tool_calls=3,
+                max_rounds=3,
             )
             review_result = await self._agents[AgentType.REVIEWER].execute(review_context)
             agents_used.append(AgentType.REVIEWER)
@@ -140,6 +154,8 @@ class AgentOrchestrator:
             if "NEEDS_REVISION" in review_result.reply or "FAIL" in review_result.reply:
                 context.metadata["review_issues"] = True
                 logger.warning("Orchestrator: Reviewer found issues in output")
+            # Deduct review tokens from main budget
+            context.token_budget = max(0, context.token_budget - review_context.tokens_used)
 
         # Compile final result
         final_reply = self._compile_final_reply(

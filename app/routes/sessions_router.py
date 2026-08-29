@@ -93,6 +93,10 @@ def build_sessions_router(
                 use_reranker=settings.reranker_enabled,
                 tool_timeout=tool_timeout_seconds,
                 max_retries=tool_max_retries,
+                # Budget-aware: use session store's budget as the token budget
+                token_budget=store.budget,
+                max_tool_calls=20,
+                max_rounds=12,
             )
 
             result = await orchestrator.execute(context, force_agent=force_agent)

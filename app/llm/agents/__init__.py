@@ -3,7 +3,7 @@ Multi-Agent Orchestration Package
 
 Exports:
 - Base types: AgentType, AgentContext, AgentResult, BaseAgent
-- Specialized agents: PlannerAgent, CoderAgent, ResearcherAgent, ReviewerAgent, GeneralAgent
+- Specialized agents: PlannerAgent, CodeReaderAgent, CodeWriterAgent, ResearcherAgent, ReviewerAgent, GeneralAgent
 - Classifier: QueryClassifier, ClassificationResult
 - Orchestrator: AgentOrchestrator, OrchestrationResult
 - Singleton accessors: get_orchestrator, get_classifier
@@ -16,7 +16,8 @@ from .base import (
     BaseAgent,
 )
 from .planner import PlannerAgent
-from .coder import CoderAgent
+from .code_reader import CodeReaderAgent
+from .code_writer import CodeWriterAgent
 from .researcher import ResearcherAgent
 from .reviewer import ReviewerAgent
 from .general import GeneralAgent
@@ -29,7 +30,8 @@ __all__ = [
     "AgentResult",
     "BaseAgent",
     "PlannerAgent",
-    "CoderAgent",
+    "CodeReaderAgent",
+    "CodeWriterAgent",
     "ResearcherAgent",
     "ReviewerAgent",
     "GeneralAgent",
