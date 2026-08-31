@@ -86,7 +86,7 @@ def load_settings() -> Settings:
             "  export LLM_API_KEY=\"$(python -c 'import secrets; print(secrets.token_urlsafe(32))')\"\n"
         )
 
-    return Settings(
+    settings = Settings(
         api_key=api_key,
         host=os.environ.get("LLM_HOST", "0.0.0.0"),
         port=int(os.environ.get("LLM_PORT", "8000")),
@@ -128,6 +128,22 @@ def load_settings() -> Settings:
         orchestrator_review=os.environ.get("LLM_ORCHESTRATOR_REVIEW", "true").lower() == "true",
         orchestrator_force_agent=os.environ.get("LLM_ORCHESTRATOR_FORCE_AGENT", ""),
     )
+
+    budget_sum = (
+        settings.budget_system_prompt_pct
+        + settings.budget_summary_pct
+        + settings.budget_history_pct
+        + settings.budget_rag_pct
+        + settings.budget_tools_pct
+    )
+    if budget_sum > 1.0:
+        raise ValueError(
+            f"Budget percentages sum to {budget_sum:.2f}, must be <= 1.0. "
+            f"Got: system={settings.budget_system_prompt_pct:.2f}, summary={settings.budget_summary_pct:.2f}, "
+            f"history={settings.budget_history_pct:.2f}, rag={settings.budget_rag_pct:.2f}, tools={settings.budget_tools_pct:.2f}"
+        )
+
+    return settings
 
 
 settings = load_settings()

@@ -38,7 +38,11 @@ class TestSettings:
         monkeypatch.setenv("LLM_RERANKER_ENABLED", "false")
         monkeypatch.setenv("LLM_TOOL_OUTPUT_MAX_TOKENS", "256")
         monkeypatch.setenv("LLM_TOOL_OUTPUT_SUMMARIZE", "false")
-        monkeypatch.setenv("LLM_BUDGET_HISTORY_PCT", "0.70")
+        monkeypatch.setenv("LLM_BUDGET_HISTORY_PCT", "0.50")
+        monkeypatch.setenv("LLM_BUDGET_SYSTEM_PROMPT_PCT", "0.05")
+        monkeypatch.setenv("LLM_BUDGET_SUMMARY_PCT", "0.10")
+        monkeypatch.setenv("LLM_BUDGET_RAG_PCT", "0.15")
+        monkeypatch.setenv("LLM_BUDGET_TOOLS_PCT", "0.10")
 
         settings = load_settings()
         assert settings.host == "127.0.0.1"
@@ -48,7 +52,7 @@ class TestSettings:
         assert settings.reranker_enabled is False
         assert settings.tool_output_max_tokens == 256
         assert settings.tool_output_summarize is False
-        assert settings.budget_history_pct == 0.70
+        assert settings.budget_history_pct == 0.50
 
     def test_frozen_dataclass(self):
         settings = Settings(api_key="test")
