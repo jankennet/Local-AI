@@ -7,21 +7,28 @@ the collaborators it's handed; this file just wires them together
 per-request.
 """
 
-from fastapi import APIRouter, Depends, HTTPException
+import json
+import logging
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import StreamingResponse
+from sse_starlette.sse import EventSourceResponse
 
-from ..auth import verify_api_key
+from ..auth import verify_api_key, verify_api_key_ws
 from ..models.schemas import (
     NewSessionRequest, NewSessionResponse, ChatRequest, ChatResponse, SessionInfo,
 )
 from ..sessions.store import SessionStore
 from ..llm.completion_client import CompletionClient
 from ..llm.agent_loop import run_agent_turn
+from ..llm.agent_loop_streaming import run_agent_turn_streaming, StreamEvent
 from ..llm.agents import get_orchestrator, AgentType
 from ..metrics import (
     record_session_created, record_session_deleted, record_session_expired,
     set_session_tokens, remove_session_metrics,
 )
 from ..config import settings
+
+logger = logging.getLogger(__name__)
 
 
 def build_sessions_router(
@@ -137,5 +144,113 @@ def build_sessions_router(
                 context_used=store.tokens_used(session_id),
                 context_limit=store.budget,
             )
+
+    @router.websocket("/sessions/{session_id}/chat/stream")
+    async def chat_stream_ws(websocket: WebSocket, session_id: str):
+        """WebSocket endpoint for streaming agent responses."""
+        # Verify API key from query params or headers
+        api_key = websocket.query_params.get("api_key") or websocket.headers.get("x-api-key")
+        if not api_key or not verify_api_key_ws(api_key):
+            await websocket.close(code=4001, reason="Invalid API key")
+            return
+        
+        await websocket.accept()
+        
+        if store.get(session_id) is None:
+            await websocket.send_json({"type": "error", "data": {"message": "unknown session_id"}})
+            await websocket.close()
+            return
+
+        try:
+            # Receive the initial message
+            data = await websocket.receive_json()
+            message = data.get("message", "")
+            max_tokens = data.get("max_tokens", 512)
+            temperature = data.get("temperature", 0.7)
+            
+            if not message:
+                await websocket.send_json({"type": "error", "data": {"message": "empty message"}})
+                return
+
+            store.add_turn(session_id, "user", message)
+
+            async for event in run_agent_turn_streaming(
+                store,
+                session_id,
+                completion_client,
+                tools,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                rag_query=message,
+                tool_timeout=tool_timeout_seconds,
+                max_retries=tool_max_retries,
+                rag_top_k=settings.rag_top_k,
+                rag_initial_k=settings.rag_initial_k,
+                use_reranker=settings.reranker_enabled,
+            ):
+                await websocket.send_json(json.loads(event.to_json()))
+                
+                if event.type == "done":
+                    break
+            
+            # Update session token metrics
+            set_session_tokens(session_id, store.tokens_used(session_id), store.budget)
+            
+        except WebSocketDisconnect:
+            logger.info(f"WebSocket disconnected for session {session_id}")
+        except Exception as e:
+            logger.error(f"WebSocket error for session {session_id}: {e}")
+            try:
+                await websocket.send_json({"type": "error", "data": {"message": str(e)}})
+            except:
+                pass
+        finally:
+            try:
+                await websocket.close()
+            except:
+                pass
+
+    @router.get("/sessions/{session_id}/chat/stream")
+    async def chat_stream_sse(
+        session_id: str,
+        message: str,
+        max_tokens: int = 512,
+        temperature: float = 0.7,
+        api_key: str = Depends(verify_api_key),
+    ):
+        """SSE endpoint for streaming agent responses."""
+        if store.get(session_id) is None:
+            raise HTTPException(status_code=404, detail="unknown session_id")
+
+        store.add_turn(session_id, "user", message)
+
+        async def event_generator():
+            try:
+                async for event in run_agent_turn_streaming(
+                    store,
+                    session_id,
+                    completion_client,
+                    tools,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    rag_query=message,
+                    tool_timeout=tool_timeout_seconds,
+                    max_retries=tool_max_retries,
+                    rag_top_k=settings.rag_top_k,
+                    rag_initial_k=settings.rag_initial_k,
+                    use_reranker=settings.reranker_enabled,
+                ):
+                    yield {"event": event.type, "data": event.to_json()}
+                    
+                    if event.type == "done":
+                        break
+                
+                # Update session token metrics
+                set_session_tokens(session_id, store.tokens_used(session_id), store.budget)
+            except Exception as e:
+                logger.error(f"SSE error for session {session_id}: {e}")
+                yield {"event": "error", "data": json.dumps({"type": "error", "data": {"message": str(e)}})}
+
+        return EventSourceResponse(event_generator())
 
     return router
