@@ -18,7 +18,7 @@ import uuid
 from typing import Any, Dict, Optional
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import Response, JSONResponse
-import requests
+import httpx
 
 from ..auth import verify_api_key
 from ..llm.log_buffer import get_log_buffer
@@ -103,6 +103,13 @@ def _is_supported_endpoint(path: str) -> bool:
 
 def build_proxy_router(base_url: str) -> APIRouter:
     router = APIRouter(dependencies=[Depends(verify_api_key)])
+    
+    # Shared async HTTP client with connection pooling
+    client = httpx.AsyncClient(
+        base_url=f"{base_url}/v1",
+        timeout=httpx.Timeout(300.0),
+        limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
+    )
 
     @router.api_route("/v1/{path:path}", methods=["GET", "POST"])
     async def proxy(path: str, request: Request):
@@ -131,13 +138,12 @@ def build_proxy_router(base_url: str) -> APIRouter:
                 pass  # Forward as-is if not valid JSON
 
         try:
-            upstream = requests.request(
+            upstream = await client.request(
                 method=request.method,
-                url=f"{base_url}/v1/{path}",
+                url=f"/{path}",
                 params=request.query_params,
-                data=body,
+                content=body,
                 headers={"content-type": request.headers.get("content-type", "application/json")},
-                timeout=300,
             )
 
             duration_ms = int((time.time() - start_time) * 1000)
@@ -155,7 +161,7 @@ def build_proxy_router(base_url: str) -> APIRouter:
                 headers={"X-Request-ID": request_id},
             )
 
-        except requests.exceptions.Timeout:
+        except httpx.TimeoutException:
             duration_ms = int((time.time() - start_time) * 1000)
             _log_request_line(request_id, request.method, path, 504, duration_ms, "TIMEOUT")
             _dump_llama_logs_on_error(request_id, path, request.method, 504, "TIMEOUT")
@@ -164,7 +170,7 @@ def build_proxy_router(base_url: str) -> APIRouter:
                 status_code=504,
                 headers={"X-Request-ID": request_id},
             )
-        except requests.exceptions.ConnectionError as e:
+        except httpx.ConnectError as e:
             duration_ms = int((time.time() - start_time) * 1000)
             _log_request_line(request_id, request.method, path, 503, duration_ms, f"CONNECTION_ERROR: {e}")
             _dump_llama_logs_on_error(request_id, path, request.method, 503, f"CONNECTION_ERROR: {e}")
@@ -182,5 +188,10 @@ def build_proxy_router(base_url: str) -> APIRouter:
                 status_code=500,
                 headers={"X-Request-ID": request_id},
             )
+        
+    # Cleanup on shutdown
+    @router.on_event("shutdown")
+    async def shutdown():
+        await client.aclose()
 
     return router

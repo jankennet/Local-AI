@@ -26,11 +26,8 @@ class TestSessionsRouter:
         from app.sessions.eviction import SummarizeOldestStrategy
         from app.llm.completion_client import CompletionClient
         
-        # Mock completion client - async now
-        call_count = 0
-        async def mock_complete_with_tools(messages, tool_schemas, max_tokens, temperature):
-            nonlocal call_count
-            call_count += 1
+        # Mock completion client
+        def mock_complete_with_tools(messages, tool_schemas, max_tokens, temperature):
             return {
                 "content": "Test response",
                 "tool_calls": None,
@@ -154,7 +151,8 @@ class TestSessionsRouter:
 
 class TestProxyRouter:
     @pytest.fixture
-    def app(self):
+    def client(self, mock_httpx):
+        """Create test client with mocked httpx."""
         app = FastAPI()
         router = build_proxy_router("http://localhost:8081")
         app.include_router(router)
@@ -163,44 +161,52 @@ class TestProxyRouter:
             return "test-key"
         app.dependency_overrides[verify_api_key] = mock_verify
         
-        return app
-
-    @pytest.fixture
-    def client(self, app):
         return TestClient(app)
 
-    def test_models_endpoint(self, client):
-        with patch("app.routes.proxy_router.requests.request") as mock_request:
-            mock_resp = MagicMock()
-            mock_resp.status_code = 200
-            mock_resp.json.return_value = {"data": [{"id": "model-1"}]}
-            mock_resp.content = b'{"data": [{"id": "model-1"}]}'
-            mock_resp.headers = {"content-type": "application/json"}
-            mock_request.return_value = mock_resp
-            
-            response = client.get("/v1/models", headers={"X-API-Key": "test-key"})
-            
-            assert response.status_code == 200
-            assert "data" in response.json()
+    @pytest.fixture
+    def mock_httpx(self, monkeypatch):
+        """Mock httpx.AsyncClient for testing."""
+        from unittest.mock import AsyncMock, MagicMock
+        
+        mock_client = MagicMock()
+        mock_client.request = AsyncMock()
+        
+        async def mock_aclose():
+            pass
+        mock_client.aclose = mock_aclose
+        
+        def mock_async_client(*args, **kwargs):
+            return mock_client
+        
+        monkeypatch.setattr("app.routes.proxy_router.httpx.AsyncClient", mock_async_client)
+        return mock_client
 
-    def test_chat_completions_endpoint(self, client):
-        with patch("app.routes.proxy_router.requests.request") as mock_request:
-            mock_resp = MagicMock()
-            mock_resp.status_code = 200
-            mock_resp.json.return_value = {
-                "choices": [{"message": {"content": "Hello!"}}]
-            }
-            mock_resp.content = b'{"choices": [{"message": {"content": "Hello!"}}]}'
-            mock_resp.headers = {"content-type": "application/json"}
-            mock_request.return_value = mock_resp
-            
-            response = client.post(
-                "/v1/chat/completions",
-                json={"model": "test", "messages": [{"role": "user", "content": "Hi"}]},
-                headers={"X-API-Key": "test-key"},
-            )
-            
-            assert response.status_code == 200
+    def test_models_endpoint(self, client, mock_httpx):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.content = b'{"data": [{"id": "model-1"}]}'
+        mock_resp.headers = {"content-type": "application/json"}
+        mock_httpx.request.return_value = mock_resp
+        
+        response = client.get("/v1/models", headers={"X-API-Key": "test-key"})
+        
+        assert response.status_code == 200
+        assert "data" in response.json()
+
+    def test_chat_completions_endpoint(self, client, mock_httpx):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.content = b'{"choices": [{"message": {"content": "Hello!"}}]}'
+        mock_resp.headers = {"content-type": "application/json"}
+        mock_httpx.request.return_value = mock_resp
+        
+        response = client.post(
+            "/v1/chat/completions",
+            json={"model": "test", "messages": [{"role": "user", "content": "Hi"}]},
+            headers={"X-API-Key": "test-key"},
+        )
+        
+        assert response.status_code == 200
 
 
 class TestDebugRouter:
