@@ -17,6 +17,7 @@ Safety, not optional:
   - Structured extraction reduces token usage while preserving actionable info.
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -237,12 +238,6 @@ def _resolve(path: str) -> str:
     return full
 
 
-def _truncate(text: str) -> str:
-    if len(text) > MAX_OUTPUT_CHARS:
-        return text[:MAX_OUTPUT_CHARS] + f"\n...[truncated, {len(text)} chars total]"
-    return text
-
-
 def _log_tool_call(name: str, args: dict, start_time: float, success: bool, error: str = None) -> None:
     duration = time.time() - start_time
     if success:
@@ -251,15 +246,15 @@ def _log_tool_call(name: str, args: dict, start_time: float, success: bool, erro
         logger.warning(f"tool_call_failed: {name} args={args} duration_ms={int(duration * 1000)} error={error}")
 
 
-def read_file(path: str) -> str:
+async def read_file(path: str) -> str:
     start = time.time()
     try:
         full = _resolve(path)
         if not os.path.isfile(full):
             _log_tool_call("read_file", {"path": path}, start, False, "file not found")
             return f"Error: no such file '{path}'"
-        with open(full, "r", errors="replace") as f:
-            content = f.read()
+        loop = asyncio.get_event_loop()
+        content = await loop.run_in_executor(None, lambda: open(full, "r", errors="replace").read())
         _log_tool_call("read_file", {"path": path}, start, True)
         content = _truncate(content)
         if settings.tool_output_summarize:
@@ -271,13 +266,13 @@ def read_file(path: str) -> str:
         return f"Error reading file: {type(e).__name__}: {e}"
 
 
-def write_file(path: str, content: str) -> str:
+async def write_file(path: str, content: str) -> str:
     start = time.time()
     try:
         full = _resolve(path)
         os.makedirs(os.path.dirname(full), exist_ok=True)
-        with open(full, "w") as f:
-            f.write(content)
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, lambda: open(full, "w").write(content))
         result = f"Wrote {len(content)} chars to {path}"
         _log_tool_call("write_file", {"path": path, "chars": len(content)}, start, True)
         return result
@@ -286,14 +281,16 @@ def write_file(path: str, content: str) -> str:
         return f"Error writing file: {type(e).__name__}: {e}"
 
 
-def list_dir(path: str = ".") -> str:
+async def list_dir(path: str = ".") -> str:
     start = time.time()
     try:
         full = _resolve(path)
         if not os.path.isdir(full):
             _log_tool_call("list_dir", {"path": path}, start, False, "directory not found")
             return f"Error: no such directory '{path}'"
-        result = "\n".join(sorted(os.listdir(full))) or "(empty)"
+        loop = asyncio.get_event_loop()
+        items = await loop.run_in_executor(None, lambda: sorted(os.listdir(full)))
+        result = "\n".join(items) or "(empty)"
         _log_tool_call("list_dir", {"path": path}, start, True)
         result = _truncate(result)
         if settings.tool_output_summarize:
@@ -305,15 +302,19 @@ def list_dir(path: str = ".") -> str:
         return f"Error listing directory: {type(e).__name__}: {e}"
 
 
-def run_bash(command: str) -> str:
+async def run_bash(command: str) -> str:
     start = time.time()
     if os.environ.get("LLM_ALLOW_SHELL") != "1":
         _log_tool_call("run_bash", {"command": command}, start, False, "shell disabled")
         return "Error: shell execution is disabled (set LLM_ALLOW_SHELL=1 to enable)"
     try:
-        result = subprocess.run(
-            command, shell=True, cwd=WORKSPACE_DIR,
-            capture_output=True, text=True, timeout=30,
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: subprocess.run(
+                command, shell=True, cwd=WORKSPACE_DIR,
+                capture_output=True, text=True, timeout=30,
+            ),
         )
         output = (result.stdout + result.stderr) or "(no output)"
         success = result.returncode == 0

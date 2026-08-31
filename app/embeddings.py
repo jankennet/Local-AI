@@ -325,16 +325,6 @@ class QdrantVectorStore:
         )
         return point_id
 
-    def add_batch(self, texts: List[str], metadatas: List[dict]) -> List[str]:
-        point_ids = [str(uuid.uuid4()) for _ in texts]
-        vectors = self._embeddings.embed(texts).tolist()
-        points = [
-            qmodels.PointStruct(id=pid, vector=vec, payload={"text": text, **meta})
-            for pid, vec, text, meta in zip(point_ids, vectors, texts, metadatas)
-        ]
-        self._client.upsert(collection_name=self._collection_name, points=points)
-        return point_ids
-
     def search(
         self,
         query: str,
@@ -351,33 +341,6 @@ class QdrantVectorStore:
         )
         return [(r.score, r.payload["text"], {k: v for k, v in r.payload.items() if k != "text"}) for r in results.points]
 
-    def search_hybrid(
-        self,
-        query: str,
-        top_k: int = 5,
-        filter: Optional[qmodels.Filter] = None,
-        sparse_weight: float = 0.3,
-    ) -> List[Tuple[float, str, dict]]:
-        """Hybrid search combining dense (semantic) + sparse (keyword/BM25)."""
-        q_vec = self._embeddings.embed_single(query).tolist()
-        results = self._client.query_points(
-            collection_name=self._collection_name,
-            query=qmodels.NamedVector(
-                name="dense",
-                vector=q_vec,
-            ),
-            limit=top_k,
-            query_filter=filter,
-            with_payload=True,
-        )
-        return [(r.score, r.payload["text"], {k: v for k, v in r.payload.items() if k != "text"}) for r in results.points]
-
-    def delete(self, point_id: str) -> None:
-        self._client.delete(
-            collection_name=self._collection_name,
-            points_selector=qmodels.PointIdsList(points=[point_id]),
-        )
-
     def clear(self) -> None:
         self._client.delete_collection(collection_name=self._collection_name)
         self._ensure_collection()
@@ -387,10 +350,6 @@ class QdrantVectorStore:
 
     def __len__(self) -> int:
         return self.count()
-
-    def get_client(self) -> QdrantClient:
-        """Access raw client for advanced operations (scroll, facet, etc.)."""
-        return self._client
 
 
 def create_vector_store(

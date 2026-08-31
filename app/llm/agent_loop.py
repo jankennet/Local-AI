@@ -163,7 +163,7 @@ async def _execute_tools_parallel(
         for attempt in range(max_retries + 1):
             try:
                 result = await asyncio.wait_for(
-                    asyncio.to_thread(_execute_tool, tools, call),
+                    _execute_tool(tools, call),
                     timeout=timeout,
                 )
                 record_tool_call(name, time.time() - start, True, retries)
@@ -187,7 +187,7 @@ async def _execute_tools_parallel(
     return await asyncio.gather(*tasks, return_exceptions=False)
 
 
-def _execute_tool(tools: dict, call: dict) -> str:
+async def _execute_tool(tools: dict, call: dict) -> str:
     name = call["function"]["name"]
     tool = tools.get(name)
     if tool is None:
@@ -201,7 +201,7 @@ def _execute_tool(tools: dict, call: dict) -> str:
     _validate_args(tool.get("schema"), args, name)
 
     try:
-        return tool["fn"](**args)
+        return await tool["fn"](**args)
     except Exception as e:
         return f"Error running {name}: {type(e).__name__}: {e}"
 

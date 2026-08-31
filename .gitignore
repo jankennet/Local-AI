@@ -13,6 +13,7 @@ llama.cpp/
 
 # Qdrant vector database
 qdrant_db/
+test_qdrant/
 
 # IDE/editor noise
 .vscode/
@@ -44,3 +45,4 @@ tmp/
 
 # Workspace directory (runtime for file tools)
 workspace/
+prompt_cache/
