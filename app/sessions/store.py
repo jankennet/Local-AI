@@ -35,6 +35,7 @@ class SessionStore:
         n_ctx: int,
         reserve_for_response: int = 768,
         ttl_days: int = 30,
+        max_sessions_per_user: int = 50,
         embedding_service: Optional[EmbeddingService] = None,
         vector_store_factory: Optional[Callable[[EmbeddingService], VectorStore]] = None,
     ):
@@ -44,34 +45,87 @@ class SessionStore:
         self._n_ctx = n_ctx
         self._reserve = reserve_for_response
         self._ttl_seconds = ttl_days * 86400
+        self._max_sessions_per_user = max_sessions_per_user
         self._embedding_service = embedding_service
         self._vector_store_factory = vector_store_factory
         self._sessions: Dict[str, Session] = self._repo.load()
-        self._init_vector_stores()
-
-    def _init_vector_stores(self) -> None:
-        if self._embedding_service:
-            for s in self._sessions.values():
-                s.init_vector_store(self._embedding_service, self._vector_store_factory)
+        # Vector stores are lazily initialized on first use (RAG or add_to_vector_store)
 
     @property
     def budget(self) -> int:
         return self._n_ctx - self._reserve
 
     # ---- lifecycle -----------------------------------------------------
-    def create_session(self, device_name: str = "unknown device",
-                        system_prompt: Optional[str] = None) -> Session:
+    def create_session(
+        self,
+        device_name: str = "unknown device",
+        system_prompt: Optional[str] = None,
+        external_id: str = "",
+        metadata: Optional[dict] = None,
+    ) -> Session:
+        # Enforce max sessions per user (based on external_id prefix)
+        if external_id and self._max_sessions_per_user > 0:
+            source_user = self._parse_external_id(external_id)
+            if source_user:
+                user_sessions = self._count_user_sessions(source_user)
+                if user_sessions >= self._max_sessions_per_user:
+                    self._evict_oldest_user_session(source_user)
+
         sid = str(uuid.uuid4())
         s = Session(
             session_id=sid,
             device_name=device_name,
             system_prompt=system_prompt or "You are a helpful assistant.",
+            external_id=external_id,
+            metadata=metadata or {},
         )
-        if self._embedding_service:
-            s.init_vector_store(self._embedding_service, self._vector_store_factory)
+        # Vector store is lazily initialized when first needed (RAG or add_to_vector_store)
         self._sessions[sid] = s
         self._repo.save(self._sessions)
         return s
+
+    def _parse_external_id(self, external_id: str) -> Optional[str]:
+        """Parse external_id to extract source:user_id. Returns 'source:user_id' or None."""
+        parts = external_id.split(":", 2)
+        if len(parts) >= 2:
+            return f"{parts[0]}:{parts[1]}"
+        return None
+
+    def _count_user_sessions(self, source_user: str) -> int:
+        count = 0
+        for s in self._sessions.values():
+            if s.external_id.startswith(source_user + ":"):
+                count += 1
+        return count
+
+    def _evict_oldest_user_session(self, source_user: str) -> None:
+        oldest = None
+        oldest_time = float("inf")
+        for sid, s in self._sessions.items():
+            if s.external_id.startswith(source_user + ":"):
+                if s.last_active < oldest_time:
+                    oldest_time = s.last_active
+                    oldest = sid
+        if oldest:
+            del self._sessions[oldest]
+            self._repo.save(self._sessions)
+
+    def get_by_external_id(self, external_id: str) -> Optional[Session]:
+        for s in self._sessions.values():
+            if s.external_id == external_id:
+                return s
+        return None
+
+    def list_by_user(self, user_id: str) -> List[Session]:
+        results = []
+        for s in self._sessions.values():
+            if s.external_id.startswith(f"discord:{user_id}:") or s.external_id.startswith(f"vscode:{user_id}:"):
+                results.append(s)
+        return results
+
+    def list_by_source(self, source: str) -> List[Session]:
+        prefix = f"{source}:"
+        return [s for s in self._sessions.values() if s.external_id.startswith(prefix)]
 
     def get(self, session_id: str) -> Optional[Session]:
         return self._sessions.get(session_id)
@@ -90,7 +144,7 @@ class SessionStore:
         s.history.append({"role": role, "content": content, **extra})
         s.last_active = time.time()
         if self._embedding_service:
-            s.add_to_vector_store(role, content, turn_index)
+            s.add_to_vector_store(role, content, turn_index, self._embedding_service, self._vector_store_factory)
         
         # Deduplicate tool history if this is a tool message
         if role == "tool" and self._embedding_service:
@@ -100,8 +154,6 @@ class SessionStore:
             )
         
         self._eviction.evict(s, self._counter, self.budget)
-        if self._embedding_service:
-            s.init_vector_store(self._embedding_service, self._vector_store_factory)
         self._repo.save(self._sessions)
         
         # Record token usage metrics
@@ -120,6 +172,8 @@ class SessionStore:
             rag_initial_k=rag_initial_k,
             use_reranker=use_reranker,
             token_counter=self._counter,
+            embedding_service=self._embedding_service if use_rag else None,
+            vector_store_factory=self._vector_store_factory if use_rag else None,
         )
 
     def tokens_used(self, session_id: str) -> int:

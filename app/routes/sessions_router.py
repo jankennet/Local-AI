@@ -16,6 +16,7 @@ from sse_starlette.sse import EventSourceResponse
 from ..auth import verify_api_key, verify_api_key_ws
 from ..models.schemas import (
     NewSessionRequest, NewSessionResponse, ChatRequest, ChatResponse, SessionInfo,
+    SessionDetailResponse,
 )
 from ..sessions.store import SessionStore
 from ..llm.completion_client import CompletionClient
@@ -42,19 +43,45 @@ def build_sessions_router(
 
     @router.post("/sessions", response_model=NewSessionResponse)
     def create_session(req: NewSessionRequest):
-        s = store.create_session(req.device_name, req.system_prompt)
-        record_session_created()
-        set_session_tokens(s.session_id, 0, store.budget)
-        return NewSessionResponse(session_id=s.session_id)
+        try:
+            s = store.create_session(
+                req.device_name,
+                req.system_prompt,
+                external_id=req.external_id or "",
+                metadata=req.metadata,
+            )
+            record_session_created()
+            set_session_tokens(s.session_id, 0, store.budget)
+            return NewSessionResponse(session_id=s.session_id, external_id=s.external_id or None)
+        except Exception as e:
+            logger.exception("Failed to create session: %s", e)
+            raise HTTPException(status_code=500, detail=str(e))
 
     @router.get("/sessions", response_model=list[SessionInfo])
-    def list_sessions():
+    def list_sessions(user_id: str = None, source: str = None, external_id: str = None):
+        if external_id:
+            s = store.get_by_external_id(external_id)
+            sessions = [s] if s else []
+        elif user_id:
+            sessions = store.list_by_user(user_id)
+        elif source:
+            sessions = store.list_by_source(source)
+        else:
+            sessions = store.list_sessions()
+
         return [
-            SessionInfo(session_id=s.session_id, device_name=s.device_name,
-                        turns=len(s.history), last_active=s.last_active,
-                        context_used=store.tokens_used(s.session_id),
-                        context_limit=store.budget)
-            for s in store.list_sessions()
+            SessionInfo(
+                session_id=s.session_id,
+                device_name=s.device_name,
+                turns=len(s.history),
+                last_active=s.last_active,
+                context_used=store.tokens_used(s.session_id),
+                context_limit=store.budget,
+                external_id=s.external_id or None,
+                metadata=s.metadata or None,
+                source=s.external_id.split(":")[0] if s.external_id else None,
+            )
+            for s in sessions
         ]
 
     @router.delete("/sessions/{session_id}")
@@ -64,50 +91,79 @@ def build_sessions_router(
         remove_session_metrics(session_id)
         return {"deleted": session_id}
 
+    @router.get("/sessions/{session_id}", response_model=SessionDetailResponse)
+    def get_session(session_id: str):
+        s = store.get(session_id)
+        if s is None:
+            raise HTTPException(status_code=404, detail="unknown session_id")
+        return SessionDetailResponse(
+            session_id=s.session_id,
+            device_name=s.device_name,
+            system_prompt=s.system_prompt,
+            history=s.history,
+            summary=s.summary,
+            created_at=s.created_at,
+            last_active=s.last_active,
+            external_id=s.external_id or None,
+            metadata=s.metadata or None,
+            source=s.external_id.split(":")[0] if s.external_id else None,
+            context_used=store.tokens_used(s.session_id),
+            context_limit=store.budget,
+        )
+
     @router.post("/sessions/{session_id}/chat", response_model=ChatResponse)
     async def chat(session_id: str, req: ChatRequest):
         if store.get(session_id) is None:
             raise HTTPException(status_code=404, detail="unknown session_id")
 
-        store.add_turn(session_id, "user", req.message)
+        try:
+            store.add_turn(session_id, "user", req.message)
+        except Exception as e:
+            logger.exception("Failed to add turn: %s", e)
+            raise HTTPException(status_code=500, detail=f"add_turn failed: {e}")
 
         # Use orchestrator if enabled, otherwise fall back to legacy agent_loop
         if settings.orchestrator_enabled:
-            orchestrator = get_orchestrator()
-            orchestrator.configure(
-                enable_planning=settings.orchestrator_planning,
-                enable_review=settings.orchestrator_review,
-            )
+            try:
+                orchestrator = get_orchestrator()
+                orchestrator.configure(
+                    enable_planning=settings.orchestrator_planning,
+                    enable_review=settings.orchestrator_review,
+                )
 
-            force_agent = None
-            if settings.orchestrator_force_agent:
-                try:
-                    force_agent = AgentType(settings.orchestrator_force_agent.lower())
-                except ValueError:
-                    pass  # Invalid agent type, use auto-classification
+                force_agent = None
+                if settings.orchestrator_force_agent:
+                    try:
+                        force_agent = AgentType(settings.orchestrator_force_agent.lower())
+                    except ValueError:
+                        pass  # Invalid agent type, use auto-classification
 
-            from ..llm.agents import AgentContext
-            context = AgentContext(
-                session_id=session_id,
-                query=req.message,
-                store=store,
-                completion_client=completion_client,
-                tools=tools,
-                max_tokens=req.max_tokens,
-                temperature=req.temperature,
-                rag_top_k=settings.rag_top_k,
-                rag_initial_k=settings.rag_initial_k,
-                use_reranker=settings.reranker_enabled,
-                tool_timeout=tool_timeout_seconds,
-                max_retries=tool_max_retries,
-                # Budget-aware: use session store's budget as the token budget
-                token_budget=store.budget,
-                max_tool_calls=20,
-                max_rounds=12,
-            )
+                from ..llm.agents import AgentContext
+                context = AgentContext(
+                    session_id=session_id,
+                    query=req.message,
+                    store=store,
+                    completion_client=completion_client,
+                    tools=tools,
+                    max_tokens=req.max_tokens,
+                    temperature=req.temperature,
+                    rag_top_k=settings.rag_top_k,
+                    rag_initial_k=settings.rag_initial_k,
+                    use_reranker=settings.reranker_enabled,
+                    use_rag=req.use_rag,
+                    tool_timeout=tool_timeout_seconds,
+                    max_retries=tool_max_retries,
+                    # Budget-aware: use session store's budget as the token budget
+                    token_budget=store.budget,
+                    max_tool_calls=20,
+                    max_rounds=12,
+                )
 
-            result = await orchestrator.execute(context, force_agent=force_agent)
-            reply = result.final_reply
+                result = await orchestrator.execute(context, force_agent=force_agent)
+                reply = result.final_reply
+            except Exception as e:
+                logger.exception("Orchestrator failed: %s", e)
+                raise HTTPException(status_code=500, detail=f"Orchestrator failed: {e}")
 
             # Update session token metrics
             set_session_tokens(session_id, store.tokens_used(session_id), store.budget)
@@ -127,7 +183,7 @@ def build_sessions_router(
                 tools,
                 max_tokens=req.max_tokens,
                 temperature=req.temperature,
-                rag_query=req.message,
+                rag_query=req.message if req.use_rag else None,
                 tool_timeout=tool_timeout_seconds,
                 max_retries=tool_max_retries,
                 rag_top_k=settings.rag_top_k,
@@ -167,6 +223,7 @@ def build_sessions_router(
             message = data.get("message", "")
             max_tokens = data.get("max_tokens", 512)
             temperature = data.get("temperature", 0.7)
+            use_rag = data.get("use_rag", False)
             
             if not message:
                 await websocket.send_json({"type": "error", "data": {"message": "empty message"}})
@@ -181,7 +238,7 @@ def build_sessions_router(
                 tools,
                 max_tokens=max_tokens,
                 temperature=temperature,
-                rag_query=message,
+                rag_query=message if use_rag else None,
                 tool_timeout=tool_timeout_seconds,
                 max_retries=tool_max_retries,
                 rag_top_k=settings.rag_top_k,
@@ -216,6 +273,7 @@ def build_sessions_router(
         message: str,
         max_tokens: int = 512,
         temperature: float = 0.7,
+        use_rag: bool = False,
         api_key: str = Depends(verify_api_key),
     ):
         """SSE endpoint for streaming agent responses."""
@@ -233,7 +291,7 @@ def build_sessions_router(
                     tools,
                     max_tokens=max_tokens,
                     temperature=temperature,
-                    rag_query=message,
+                    rag_query=message if use_rag else None,
                     tool_timeout=tool_timeout_seconds,
                     max_retries=tool_max_retries,
                     rag_top_k=settings.rag_top_k,

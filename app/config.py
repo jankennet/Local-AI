@@ -75,6 +75,11 @@ class Settings:
     orchestrator_review: bool = True            # Enable output review for quality
     orchestrator_force_agent: str = ""          # Force specific agent: planner/code_reader/code_writer/researcher/reviewer/general
 
+    # Qdrant server mode (if set, uses Qdrant client instead of embedded)
+    qdrant_server_url: str = ""                 # e.g. "http://localhost:6333"
+    # Session limits
+    max_sessions_per_user: int = 50             # Max sessions per user (enforced server-side)
+
 
 def load_settings() -> Settings:
     api_key = os.environ.get("LLM_API_KEY")
@@ -127,6 +132,8 @@ def load_settings() -> Settings:
         orchestrator_planning=os.environ.get("LLM_ORCHESTRATOR_PLANNING", "true").lower() == "true",
         orchestrator_review=os.environ.get("LLM_ORCHESTRATOR_REVIEW", "true").lower() == "true",
         orchestrator_force_agent=os.environ.get("LLM_ORCHESTRATOR_FORCE_AGENT", ""),
+        qdrant_server_url=os.environ.get("LLM_QDRANT_SERVER_URL", ""),
+        max_sessions_per_user=int(os.environ.get("LLM_MAX_SESSIONS_PER_USER", "50")),
     )
 
     budget_sum = (

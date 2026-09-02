@@ -48,14 +48,16 @@ def _get_vector_store(
     vector_backend: str,
     vector_db_path: str,
     vector_collection: str,
+    qdrant_server_url: str = "",
 ) -> VectorStore:
     """Get or create cached vector store instance."""
-    key = f"{vector_backend}:{vector_db_path}:{vector_collection}"
+    key = f"{vector_backend}:{vector_db_path}:{vector_collection}:{qdrant_server_url}"
     if key not in _vector_store_cache:
         _vector_store_cache[key] = create_vector_store(
             embedding_service,
             backend=vector_backend,
             path=vector_db_path,
+            url=qdrant_server_url,
             collection_name=vector_collection,
         )
     return _vector_store_cache[key]
@@ -67,6 +69,7 @@ def build_debug_router(
     vector_backend: str,
     vector_db_path: str,
     vector_collection: str,
+    qdrant_server_url: str = "",
 ) -> APIRouter:
     router = APIRouter(dependencies=[Depends(verify_api_key)])
     enabled = os.environ.get("LLM_ENABLE_DEBUG", "false").lower() == "true"
@@ -78,7 +81,7 @@ def build_debug_router(
     @router.get("/debug/vector/stats", response_model=VectorStatsResponse)
     def vector_stats():
         _check_enabled()
-        vs = _get_vector_store(embedding_service, vector_backend, vector_db_path, vector_collection)
+        vs = _get_vector_store(embedding_service, vector_backend, vector_db_path, vector_collection, qdrant_server_url)
         return VectorStatsResponse(
             backend=vector_backend,
             collection=vector_collection,
@@ -91,7 +94,7 @@ def build_debug_router(
     @router.post("/debug/vector/search", response_model=VectorSearchResponse)
     def vector_search(req: VectorSearchRequest):
         _check_enabled()
-        vs = _get_vector_store(embedding_service, vector_backend, vector_db_path, vector_collection)
+        vs = _get_vector_store(embedding_service, vector_backend, vector_db_path, vector_collection, qdrant_server_url)
 
         filter_ = None
         if req.session_id and vector_backend == "qdrant":
@@ -120,14 +123,14 @@ def build_debug_router(
     @router.post("/debug/vector/add")
     def vector_add(req: VectorAddRequest):
         _check_enabled()
-        vs = _get_vector_store(embedding_service, vector_backend, vector_db_path, vector_collection)
+        vs = _get_vector_store(embedding_service, vector_backend, vector_db_path, vector_collection, qdrant_server_url)
         point_id = vs.add(req.text, req.metadata)
         return {"id": point_id, "total_vectors": len(vs)}
 
     @router.delete("/debug/vector/clear")
     def vector_clear():
         _check_enabled()
-        vs = _get_vector_store(embedding_service, vector_backend, vector_db_path, vector_collection)
+        vs = _get_vector_store(embedding_service, vector_backend, vector_db_path, vector_collection, qdrant_server_url)
         vs.clear()
         return {"cleared": True, "total_vectors": len(vs)}
 

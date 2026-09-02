@@ -40,6 +40,7 @@ class AgentContext:
     rag_top_k: int = 5
     rag_initial_k: int = 20
     use_reranker: bool = True
+    use_rag: bool = False
     tool_timeout: float = 30.0
     max_retries: int = 2
     metadata: dict = field(default_factory=dict)
@@ -208,7 +209,7 @@ class BaseAgent(ABC):
             for attempt in range(context.max_retries + 1):
                 try:
                     result = await asyncio.wait_for(
-                        asyncio.to_thread(self._execute_tool, context.tools, call),
+                        self._execute_tool(context.tools, call),
                         timeout=context.tool_timeout,
                     )
                     record_tool_call(name, time.time() - start, True, retries)
@@ -235,7 +236,7 @@ class BaseAgent(ABC):
         tasks = [execute_with_retry(call) for call in tool_calls]
         return await asyncio.gather(*tasks, return_exceptions=False)
 
-    def _execute_tool(self, tools: dict, call: dict) -> str:
+    async def _execute_tool(self, tools: dict, call: dict) -> str:
         import json
 
         name = call["function"]["name"]
@@ -251,7 +252,7 @@ class BaseAgent(ABC):
         self._validate_args(tool.get("schema"), args, name)
 
         try:
-            return tool["fn"](**args)
+            return await tool["fn"](**args)
         except Exception as e:
             return f"Error running {name}: {type(e).__name__}: {e}"
 

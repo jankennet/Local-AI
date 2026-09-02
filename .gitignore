@@ -24,7 +24,8 @@ test_qdrant/
 .continue/*
 
 # Dev stuff
-.env/
+.env
+session.json
 
 # OS noise
 .DS_Store

@@ -103,6 +103,7 @@ def create_app() -> FastAPI:
         es,
         backend=settings.vector_backend,
         path=settings.vector_db_path,
+        url=settings.qdrant_server_url,
         collection_name=settings.vector_collection,
     )
     store = SessionStore(
@@ -112,6 +113,7 @@ def create_app() -> FastAPI:
         n_ctx=selected_config["n_ctx"],
         reserve_for_response=settings.reserve_for_response,
         ttl_days=settings.session_ttl_days,
+        max_sessions_per_user=settings.max_sessions_per_user,
         embedding_service=embedding_service,
         vector_store_factory=vector_store_factory,
     )
@@ -147,6 +149,7 @@ def create_app() -> FastAPI:
     app.include_router(build_debug_router(
         store, embedding_service,
         settings.vector_backend, settings.vector_db_path, settings.vector_collection,
+        settings.qdrant_server_url,
     ))
 
     # Prometheus metrics endpoint

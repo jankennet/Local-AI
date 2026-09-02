@@ -24,6 +24,8 @@ class Session:
     summary: str = ""
     created_at: float = field(default_factory=time.time)
     last_active: float = field(default_factory=time.time)
+    external_id: str = ""
+    metadata: dict = field(default_factory=dict)
 
     # Non-serialized runtime fields
     _vector_store: Optional[VectorStore] = field(default=None, init=False, repr=False, compare=False)
@@ -42,22 +44,36 @@ class Session:
         embedding_service: EmbeddingService,
         store_factory: Optional[Callable[[EmbeddingService], VectorStore]] = None,
     ) -> None:
+        """Initialize vector store lazily - only if not already initialized."""
+        if self._vector_store is not None:
+            return  # Already initialized
         self._embedding_service = embedding_service
         if store_factory:
             self._vector_store = store_factory(embedding_service)
         else:
             from ..embeddings import SimpleVectorStore
             self._vector_store = SimpleVectorStore(embedding_service)
+        # Re-index existing history
         for i, msg in enumerate(self.history):
             content = msg.get("content") or ""
             if content.strip():
                 self._vector_store.add(content, {"turn_index": i, "role": msg.get("role")})
 
-    def add_to_vector_store(self, role: str, content: str, turn_index: int) -> None:
-        if self._vector_store and content.strip():
-            self._vector_store.add(content, {"turn_index": turn_index, "role": role})
+    def _ensure_vector_store(self, embedding_service: EmbeddingService, store_factory: Optional[Callable[[EmbeddingService], VectorStore]] = None) -> None:
+        """Ensure vector store is initialized (lazy initialization)."""
+        if self._vector_store is None:
+            self.init_vector_store(embedding_service, store_factory)
 
-    def retrieve_relevant(self, query: str, top_k: int = None, initial_k: int = None, use_reranker: bool = None, use_dedup: bool = None) -> List[Tuple[float, str, dict]]:
+    def add_to_vector_store(self, role: str, content: str, turn_index: int, embedding_service: EmbeddingService = None, store_factory: Optional[Callable[[EmbeddingService], VectorStore]] = None) -> None:
+        if content.strip():
+            if self._vector_store is None and embedding_service:
+                self._ensure_vector_store(embedding_service, store_factory)
+            if self._vector_store:
+                self._vector_store.add(content, {"turn_index": turn_index, "role": role})
+
+    def retrieve_relevant(self, query: str, top_k: int = None, initial_k: int = None, use_reranker: bool = None, use_dedup: bool = None, embedding_service: EmbeddingService = None, store_factory: Optional[Callable[[EmbeddingService], VectorStore]] = None) -> List[Tuple[float, str, dict]]:
+        if self._vector_store is None and embedding_service:
+            self._ensure_vector_store(embedding_service, store_factory)
         if not self._vector_store:
             return []
         
@@ -175,6 +191,8 @@ class Session:
         rag_initial_k: int = None,
         use_reranker: bool = None,
         token_counter: Optional[TokenCounter] = None,
+        embedding_service: Optional[EmbeddingService] = None,
+        vector_store_factory: Optional[Callable[[EmbeddingService], VectorStore]] = None,
     ) -> list:
         if not token_counter:
             # Fallback to simple behavior
@@ -184,7 +202,7 @@ class Session:
                     (m.get("content") or "") for m in self.history[-3:] if m.get("content")
                 )
                 retrieval_query = f"{query} {self.summary} {recent_context}".strip()
-                retrieved = self.retrieve_relevant(retrieval_query, rag_top_k, rag_initial_k, use_reranker, True)
+                retrieved = self.retrieve_relevant(retrieval_query, rag_top_k, rag_initial_k, use_reranker, True, embedding_service, vector_store_factory)
                 if retrieved:
                     context_lines = [f"[Relevant context]: {text}" for _, text, _ in retrieved]
                     msgs.append({"role": "system", "content": "\n".join(context_lines)})
@@ -213,12 +231,12 @@ class Session:
         
         # Add RAG context if enabled
         rag_msgs = []
-        if use_rag and query and self._vector_store:
+        if use_rag and query and (self._vector_store or embedding_service):
             recent_context = " ".join(
                 (m.get("content") or "") for m in self.history[-3:] if m.get("content")
             )
             retrieval_query = f"{query} {self.summary} {recent_context}".strip()
-            retrieved = self.retrieve_relevant(retrieval_query, rag_top_k, rag_initial_k, use_reranker, True)
+            retrieved = self.retrieve_relevant(retrieval_query, rag_top_k, rag_initial_k, use_reranker, True, embedding_service, vector_store_factory)
             if retrieved:
                 retrieved = self._fit_retrieved_to_budget(retrieved, rag_budget, token_counter)
                 if retrieved:

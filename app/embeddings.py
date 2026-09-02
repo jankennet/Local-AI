@@ -7,6 +7,7 @@ Supports multiple models (general + code-specialized) with different dimensions.
 Also provides a Reranker service for cross-encoder reranking of retrieved results.
 """
 
+import logging
 import os
 import threading
 import uuid
@@ -15,6 +16,8 @@ from typing import List, Optional, Tuple, Dict, Any, Protocol, Callable
 import numpy as np
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qmodels
+
+logger = logging.getLogger(__name__)
 
 _GENERAL_MODEL = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
 _CODE_MODEL = os.getenv("EMBEDDING_MODEL_CODE", "sentence-transformers/all-MiniLM-L6-v2")
@@ -288,7 +291,7 @@ class SimpleVectorStore:
 
 class QdrantVectorStore:
     """
-    Persistent vector store using Qdrant (embedded mode).
+    Persistent vector store using Qdrant (embedded or server mode).
     Supports hybrid search, payload filtering, and scalable persistence.
     """
 
@@ -297,10 +300,16 @@ class QdrantVectorStore:
         embedding_service: EmbeddingService,
         path: str = "./qdrant_db",
         collection_name: str = "conversations",
+        url: str = "",
     ):
         self._embeddings = embedding_service
-        self._client = QdrantClient(path=path)
         self._collection_name = collection_name
+        
+        # Support both embedded (path) and server (url) modes
+        if url:
+            self._client = QdrantClient(url=url)
+        else:
+            self._client = QdrantClient(path=path)
         self._ensure_collection()
 
     def _ensure_collection(self) -> None:
@@ -314,6 +323,23 @@ class QdrantVectorStore:
                     distance=qmodels.Distance.COSINE,
                 ),
             )
+        else:
+            # Check if existing collection has correct vector size
+            collection_info = self._client.get_collection(self._collection_name)
+            existing_size = collection_info.config.params.vectors.size
+            if existing_size != self._embeddings.dimension:
+                logger.warning(
+                    f"Collection '{self._collection_name}' has vector size {existing_size} "
+                    f"but embedding model produces {self._embeddings.dimension}. Recreating."
+                )
+                self._client.delete_collection(collection_name=self._collection_name)
+                self._client.create_collection(
+                    collection_name=self._collection_name,
+                    vectors_config=qmodels.VectorParams(
+                        size=self._embeddings.dimension,
+                        distance=qmodels.Distance.COSINE,
+                    ),
+                )
 
     def add(self, text: str, metadata: dict) -> str:
         point_id = str(uuid.uuid4())
@@ -355,11 +381,12 @@ class QdrantVectorStore:
 def create_vector_store(
     embedding_service: EmbeddingService,
     backend: str = "qdrant",
+    url: str = "",
     **kwargs
 ) -> VectorStore:
     """Factory function to create vector stores by backend name."""
     if backend == "qdrant":
-        return QdrantVectorStore(embedding_service, **kwargs)
+        return QdrantVectorStore(embedding_service, url=url, **kwargs)
     elif backend == "simple":
         return SimpleVectorStore(embedding_service)
     else:

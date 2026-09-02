@@ -6,12 +6,26 @@ echo "        LocalAI Server Setup"
 echo "======================================================="
 
 echo ""
-echo "[1/6] Creating Python Virtual Environment..."
+echo "[0/7] Installing system dependencies (cmake, git, etc)..."
+if command -v apt-get &> /dev/null; then
+    sudo apt-get update && sudo apt-get install -y cmake git build-essential
+elif command -v dnf &> /dev/null; then
+    sudo dnf install -y cmake git gcc-c++ make
+elif command -v pacman &> /dev/null; then
+    sudo pacman -S --needed cmake git base-devel
+elif command -v brew &> /dev/null; then
+    brew install cmake git
+else
+    echo "WARNING: Could not detect package manager. Please ensure cmake and git are installed."
+fi
+
+echo ""
+echo "[1/7] Creating Python Virtual Environment..."
 python3 -m venv venv
 source venv/bin/activate
 
 echo ""
-echo "[2/6] Installing base dependencies..."
+echo "[2/7] Installing base dependencies..."
 pip install --upgrade pip setuptools wheel
 
 # Install everything except llama-cpp-python (built separately below,
@@ -20,7 +34,7 @@ grep -v "^llama-cpp-python" requirements.txt > /tmp/requirements-base.txt
 pip install -r /tmp/requirements-base.txt
 
 echo ""
-echo "[3/6] Selecting embedding model..."
+echo "[3/7] Selecting embedding model..."
 echo ""
 echo "Embedding models are used for semantic search (RAG) of conversation history."
 echo "Choose one:"
@@ -60,7 +74,7 @@ LLM_TOOL_MAX_RETRIES=2
 EOF
 
 echo ""
-echo "[4/6] Detecting GPU backend..."
+echo "[4/7] Detecting GPU backend..."
 
 if command -v nvidia-smi &> /dev/null; then
     echo " NVIDIA GPU detected — building with CUDA"
@@ -73,7 +87,7 @@ else
 fi
 
 echo ""
-echo "[5/6] Building llama-cpp-python (Python bindings — still used for the"
+echo "[5/7] Building llama-cpp-python (Python bindings — still used for the"
 echo "      exact-vocab tokenizer and model catalog/download, just not for"
 echo "      serving completions anymore)..."
 
@@ -88,7 +102,7 @@ pip install llama-cpp-python \
     --no-binary llama-cpp-python
 
 echo ""
-echo "[6/6] Building native llama-server (this is what actually serves"
+echo "[7/8] Building native llama-server (this is what actually serves"
 echo "      completions now — it reads each GGUF's own chat template, which"
 echo "      is what makes tool-calling work across different models instead"
 echo "      of requiring a hand-picked format per model)..."
@@ -100,6 +114,40 @@ fi
 cmake llama.cpp -B llama.cpp/build $BACKEND_CMAKE_ARGS -DBUILD_SHARED_LIBS=OFF
 cmake --build llama.cpp/build --config Release --target llama-server \
     -j "${BACKEND_BUILD_PARALLEL:-$(nproc)}"
+
+echo ""
+echo "[8/8] Qdrant vector database setup..."
+echo ""
+echo "Qdrant is used for session memory / RAG. Choose one:"
+echo ""
+echo "  1) Docker (recommended) — runs Qdrant server on localhost:6333"
+echo "  2) Embedded mode — no docker needed, but single-process only"
+echo ""
+read -p "Select Qdrant mode [1-2] (default: 1): " QDRANT_CHOICE
+QDRANT_CHOICE=${QDRANT_CHOICE:-1}
+
+if [ "$QDRANT_CHOICE" = "1" ]; then
+    # Check if docker is available
+    if command -v docker &> /dev/null && docker info &> /dev/null 2>&1; then
+        echo " Docker available — will use Qdrant server mode"
+        echo "LLM_VECTOR_BACKEND=qdrant" >> .env
+        echo "LLM_VECTOR_DB_PATH=http://localhost:6333" >> .env
+        echo "LLM_QDRANT_SERVER_URL=http://localhost:6333" >> .env
+        # Add helper to start.sh
+    else
+        echo " Docker not available or not running — falling back to embedded mode"
+        echo "LLM_VECTOR_BACKEND=qdrant" >> .env
+        echo "LLM_VECTOR_DB_PATH=./qdrant_db" >> .env
+    fi
+else
+    echo " Using embedded Qdrant mode"
+    echo "LLM_VECTOR_BACKEND=qdrant" >> .env
+    echo "LLM_VECTOR_DB_PATH=./qdrant_db" >> .env
+fi
+
+# Session limits
+echo "LLM_MAX_SESSIONS_PER_USER=50" >> .env
+echo "LLM_SESSION_TTL_DAYS=30" >> .env
 
 echo ""
 echo "Verifying llama-cpp-python installation..."
@@ -122,6 +170,6 @@ echo ""
 echo "  export LLM_API_KEY=\"\$(python -c 'import secrets; print(secrets.token_urlsafe(32))')\""
 echo "  echo \$LLM_API_KEY   # save this — every client needs it"
 echo ""
-echo "Then start the server with:"
+echo "Then start the server with (auto-starts Qdrant if using docker mode):"
 echo "  ./start.sh"
 echo ""
