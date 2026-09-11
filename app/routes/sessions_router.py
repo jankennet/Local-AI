@@ -32,6 +32,28 @@ from ..config import settings
 logger = logging.getLogger(__name__)
 
 
+def _is_casual_chat(
+    store: SessionStore,
+    session_id: str,
+    message: str,
+) -> bool:
+    """True when the message is plain conversation (no code/research/plan intent).
+
+    Casual chat runs through the lean General agent: no tools, no RAG.
+    Mirrors the orchestrator's session-context boost so both make the same
+    routing decision.
+    """
+    from ..llm.agents.classifier import get_classifier
+
+    session = store.get(session_id)
+    recent = session.history[-5:] if session else []
+    session_context = "\n".join(
+        f"{turn.get('role', 'unknown')}: {turn.get('content', '')[:200]}"
+        for turn in recent
+    )
+    return get_classifier().classify(message, session_context).agent_type == AgentType.GENERAL
+
+
 def build_sessions_router(
     store: SessionStore,
     completion_client: CompletionClient,
@@ -139,18 +161,25 @@ def build_sessions_router(
                         pass  # Invalid agent type, use auto-classification
 
                 from ..llm.agents import AgentContext
+                # Lean chat profile: plain conversational queries go to the
+                # General agent without tools or RAG. Code/research/plan
+                # queries keep the full context.
+                lean_chat = force_agent is None and _is_casual_chat(store, session_id, req.message)
+                # Only pass tools when RAG is enabled (agent workflows need tools)
+                # For simple chat, don't pass tools to avoid issues with models lacking tool calling support
+                orchestrator_tools = {} if lean_chat else (tools if req.use_rag else {})
                 context = AgentContext(
                     session_id=session_id,
                     query=req.message,
                     store=store,
                     completion_client=completion_client,
-                    tools=tools,
+                    tools=orchestrator_tools,
                     max_tokens=req.max_tokens,
                     temperature=req.temperature,
                     rag_top_k=settings.rag_top_k,
                     rag_initial_k=settings.rag_initial_k,
                     use_reranker=settings.reranker_enabled,
-                    use_rag=req.use_rag,
+                    use_rag=not lean_chat and req.use_rag,
                     tool_timeout=tool_timeout_seconds,
                     max_retries=tool_max_retries,
                     # Budget-aware: use session store's budget as the token budget
@@ -175,12 +204,14 @@ def build_sessions_router(
                 context_limit=store.budget,
             )
         else:
-            # Legacy path
+            # Legacy path - only use tools if RAG is enabled (agent workflows need tools)
+            # For simple chat, don't pass tools to avoid issues with models lacking tool calling support
+            chat_tools = tools if req.use_rag else {}
             reply = await run_agent_turn(
                 store,
                 session_id,
                 completion_client,
-                tools,
+                chat_tools,
                 max_tokens=req.max_tokens,
                 temperature=req.temperature,
                 rag_query=req.message if req.use_rag else None,
@@ -231,11 +262,13 @@ def build_sessions_router(
 
             store.add_turn(session_id, "user", message)
 
+            # Only use tools if RAG is enabled (agent workflows need tools)
+            chat_tools = tools if use_rag else {}
             async for event in run_agent_turn_streaming(
                 store,
                 session_id,
                 completion_client,
-                tools,
+                chat_tools,
                 max_tokens=max_tokens,
                 temperature=temperature,
                 rag_query=message if use_rag else None,
@@ -269,46 +302,102 @@ def build_sessions_router(
 
     @router.get("/sessions/{session_id}/chat/stream")
     async def chat_stream_sse(
-        session_id: str,
-        message: str,
-        max_tokens: int = 512,
-        temperature: float = 0.7,
-        use_rag: bool = False,
-        api_key: str = Depends(verify_api_key),
-    ):
-        """SSE endpoint for streaming agent responses."""
-        if store.get(session_id) is None:
-            raise HTTPException(status_code=404, detail="unknown session_id")
+            session_id: str,
+            message: str,
+            max_tokens: int = 512,
+            temperature: float = 0.7,
+            use_rag: bool = False,
+            api_key: str = Depends(verify_api_key),
+        ):
+            """SSE endpoint for streaming agent responses."""
+            if store.get(session_id) is None:
+                raise HTTPException(status_code=404, detail="unknown session_id")
 
-        store.add_turn(session_id, "user", message)
+            store.add_turn(session_id, "user", message)
 
-        async def event_generator():
-            try:
-                async for event in run_agent_turn_streaming(
-                    store,
-                    session_id,
-                    completion_client,
-                    tools,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    rag_query=message if use_rag else None,
-                    tool_timeout=tool_timeout_seconds,
-                    max_retries=tool_max_retries,
-                    rag_top_k=settings.rag_top_k,
-                    rag_initial_k=settings.rag_initial_k,
-                    use_reranker=settings.reranker_enabled,
-                ):
-                    yield {"event": event.type, "data": event.to_json()}
+            async def event_generator():
+                try:
+                    # Use orchestrator if enabled, otherwise fall back to legacy agent_loop
+                    if settings.orchestrator_enabled:
+                        try:
+                            orchestrator = get_orchestrator()
+                            orchestrator.configure(
+                                enable_planning=settings.orchestrator_planning,
+                                enable_review=settings.orchestrator_review,
+                            )
+
+                            force_agent = None
+                            if settings.orchestrator_force_agent:
+                                try:
+                                    force_agent = AgentType(settings.orchestrator_force_agent.lower())
+                                except ValueError:
+                                    pass  # Invalid agent type, use auto-classification
+
+                            from ..llm.agents import AgentContext
+                            # Lean chat profile: skip tools/RAG for casual
+                            # conversation (General agent handles these).
+                            lean_chat = force_agent is None and _is_casual_chat(store, session_id, message)
+                            # Only pass tools when RAG is enabled
+                            orchestrator_tools = {} if lean_chat else (tools if use_rag else {})
+                            context = AgentContext(
+                                session_id=session_id,
+                                query=message,
+                                store=store,
+                                completion_client=completion_client,
+                                tools=orchestrator_tools,
+                                max_tokens=max_tokens,
+                                temperature=temperature,
+                                rag_top_k=settings.rag_top_k,
+                                rag_initial_k=settings.rag_initial_k,
+                                use_reranker=settings.reranker_enabled,
+                                use_rag=not lean_chat and use_rag,
+                                tool_timeout=tool_timeout_seconds,
+                                max_retries=tool_max_retries,
+                                token_budget=store.budget,
+                                max_tool_calls=20,
+                                max_rounds=12,
+                            )
+
+                            result = await orchestrator.execute(context, force_agent=force_agent)
+                            # Stream the final reply as a single content_delta then done
+                            yield {"event": "content_delta", "data": json.dumps({"type": "content_delta", "data": {"content": result.final_reply}})}
+                            yield {"event": "done", "data": json.dumps({"type": "done", "data": {"reply": result.final_reply}})}
+                            
+                            # Update session token metrics
+                            set_session_tokens(session_id, store.tokens_used(session_id), store.budget)
+                            return
+                        except Exception as e:
+                            logger.exception("Orchestrator streaming failed: %s", e)
+                            # Fall back to legacy
                     
-                    if event.type == "done":
-                        break
-                
-                # Update session token metrics
-                set_session_tokens(session_id, store.tokens_used(session_id), store.budget)
-            except Exception as e:
-                logger.error(f"SSE error for session {session_id}: {e}")
-                yield {"event": "error", "data": json.dumps({"type": "error", "data": {"message": str(e)}})}
+                    # Legacy path
+                    # Only use tools if RAG is enabled (agent workflows need tools)
+                    chat_tools = tools if use_rag else {}
+                    async for event in run_agent_turn_streaming(
+                        store,
+                        session_id,
+                        completion_client,
+                        chat_tools,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                        rag_query=message if use_rag else None,
+                        tool_timeout=tool_timeout_seconds,
+                        max_retries=tool_max_retries,
+                        rag_top_k=settings.rag_top_k,
+                        rag_initial_k=settings.rag_initial_k,
+                        use_reranker=settings.reranker_enabled,
+                    ):
+                        yield {"event": event.type, "data": event.to_json()}
+                        
+                        if event.type == "done":
+                            break
+                    
+                    # Update session token metrics
+                    set_session_tokens(session_id, store.tokens_used(session_id), store.budget)
+                except Exception as e:
+                    logger.error(f"SSE error for session {session_id}: {e}")
+                    yield {"event": "error", "data": json.dumps({"type": "error", "data": {"message": str(e)}})}
 
-        return EventSourceResponse(event_generator())
+            return EventSourceResponse(event_generator())
 
     return router

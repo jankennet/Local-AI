@@ -169,6 +169,45 @@ class TestSession:
         total = sum(mock_tokenizer.count(t) for _, t, _ in fitted)
         assert total <= 120  # Some overhead
 
+    def test_fit_history_keeps_newest_when_tight_budget(self, mock_embedding_service, mock_tokenizer):
+        """The most recent user turn must survive trimming, even when it's the only message."""
+        session = Session(session_id="test-1")
+        history = [
+            {"role": "user", "content": "First message"},
+            {"role": "assistant", "content": "Second message"},
+            {"role": "user", "content": "Third message"},
+        ]
+        
+        # Each message is ~7 tokens (len//4 + 4 overhead); budget fits only one.
+        fitted = session._fit_history_to_budget(history, 10, mock_tokenizer)
+        
+        assert fitted == [{"role": "user", "content": "Third message"}]
+
+    def test_fit_history_drops_oldest_keeps_recent(self, mock_embedding_service, mock_tokenizer):
+        session = Session(session_id="test-1")
+        history = [
+            {"role": "user", "content": "First message"},
+            {"role": "assistant", "content": "Second message"},
+            {"role": "user", "content": "Third message"},
+        ]
+        
+        # Budget fits two messages -> keep the two most recent, chronological order.
+        fitted = session._fit_history_to_budget(history, 15, mock_tokenizer)
+        
+        assert fitted == [
+            {"role": "assistant", "content": "Second message"},
+            {"role": "user", "content": "Third message"},
+        ]
+
+    def test_fit_history_never_empty_on_tiny_budget(self, mock_embedding_service, mock_tokenizer):
+        """Even the very first short message must reach the model (never return [])."""
+        session = Session(session_id="test-1")
+        history = [{"role": "user", "content": "Hello"}]
+        
+        fitted = session._fit_history_to_budget(history, 1, mock_tokenizer)
+        
+        assert fitted == [{"role": "user", "content": "Hello"}]
+
 
 class TestSessionStore:
     def test_create_session(self, mock_embedding_service, mock_tokenizer, temp_dir):
@@ -293,7 +332,7 @@ class TestSessionStore:
             repository=repo,
             eviction=SummarizeOldestStrategy(),
             n_ctx=4096,
-            ttl_days=0,  # Expire immediately
+            ttl_minutes=0,  # Expire immediately
             embedding_service=mock_embedding_service,
         )
         

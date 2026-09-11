@@ -34,7 +34,7 @@ class SessionStore:
         eviction: EvictionStrategy,
         n_ctx: int,
         reserve_for_response: int = 768,
-        ttl_days: int = 30,
+        ttl_minutes: int = 60,
         max_sessions_per_user: int = 50,
         embedding_service: Optional[EmbeddingService] = None,
         vector_store_factory: Optional[Callable[[EmbeddingService], VectorStore]] = None,
@@ -44,12 +44,11 @@ class SessionStore:
         self._eviction = eviction
         self._n_ctx = n_ctx
         self._reserve = reserve_for_response
-        self._ttl_seconds = ttl_days * 86400
         self._max_sessions_per_user = max_sessions_per_user
         self._embedding_service = embedding_service
         self._vector_store_factory = vector_store_factory
         self._sessions: Dict[str, Session] = self._repo.load()
-        # Vector stores are lazily initialized on first use (RAG or add_to_vector_store)
+        # Vector stores are lazily initialized on first RAG query (build_messages with use_rag=True)
 
     @property
     def budget(self) -> int:
@@ -79,7 +78,7 @@ class SessionStore:
             external_id=external_id,
             metadata=metadata or {},
         )
-        # Vector store is lazily initialized when first needed (RAG or add_to_vector_store)
+        # Vector store is lazily initialized on first RAG query
         self._sessions[sid] = s
         self._repo.save(self._sessions)
         return s
@@ -90,6 +89,16 @@ class SessionStore:
         if len(parts) >= 2:
             return f"{parts[0]}:{parts[1]}"
         return None
+
+    def _get_session_ttl_seconds(self, external_id: str) -> int:
+        """Get TTL in seconds based on external_id prefix.
+        vscode:* -> 30 days (RAG sessions)
+        discord:* -> 60 minutes (non-RAG chat sessions)
+        default -> 60 minutes
+        """
+        if external_id.startswith("vscode:"):
+            return 30 * 24 * 60 * 60  # 30 days
+        return 60 * 60  # 60 minutes default
 
     def _count_user_sessions(self, source_user: str) -> int:
         count = 0
@@ -143,8 +152,6 @@ class SessionStore:
         turn_index = len(s.history)
         s.history.append({"role": role, "content": content, **extra})
         s.last_active = time.time()
-        if self._embedding_service:
-            s.add_to_vector_store(role, content, turn_index, self._embedding_service, self._vector_store_factory)
         
         # Deduplicate tool history if this is a tool message
         if role == "tool" and self._embedding_service:
@@ -152,6 +159,9 @@ class SessionStore:
                 s.history,
                 embedding_service=self._embedding_service,
             )
+        
+        # Vector store is initialized lazily in build_messages when use_rag=True
+        # No longer calling add_to_vector_store here to avoid eager Qdrant connection
         
         self._eviction.evict(s, self._counter, self.budget)
         self._repo.save(self._sessions)
@@ -183,12 +193,12 @@ class SessionStore:
 
     # ---- age-out ---------------------------------------------------------
     def purge_expired(self) -> int:
-        """Removes sessions untouched for longer than the configured TTL.
+        """Removes sessions untouched for longer than their configured TTL.
         Returns the number of sessions removed."""
         now = time.time()
         expired = [
             sid for sid, s in self._sessions.items()
-            if now - s.last_active > self._ttl_seconds
+            if now - s.last_active > self._get_session_ttl_seconds(s.external_id)
         ]
         for sid in expired:
             del self._sessions[sid]

@@ -45,12 +45,12 @@ class QueryClassifier:
     ]
 
     RESEARCHER_PATTERNS = [
-        r"\b(what|how|why|explain|describe|compare|analyze)\b",
-        r"\b(search|find|look up|lookup|retrieve)\b",
-        r"\b(history|context|background|summary|overview)\b",
-        r"\b(documentation|docs|spec|specification)\b",
-        r"\b(best practice|pattern|approach|strategy|recommend)\b",
-        r"\b(learn|understand|study|research)\b",
+        r"\b(search|find out|look up|lookup|retrieve|research)\b",
+        r"\b(history|background|context|overview|summary)\b.*\b(of|about)\b",
+        r"\b(documentation|docs|spec|specification|reference)\b",
+        r"\b(best practice|best practices|recommend|recommendation|approach|strategy)\b",
+        r"\b(compare|comparing|differences? between|versus|vs)\b",
+        r"\b(learn|understand|study)\b.*\b(concept|topic|subject|language|framework|technology)\b",
     ]
 
     PLANNER_PATTERNS = [

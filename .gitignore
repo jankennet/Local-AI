@@ -14,6 +14,7 @@ llama.cpp/
 # Qdrant vector database
 qdrant_db/
 test_qdrant/
+qdrant_db.old
 
 # IDE/editor noise
 .vscode/
@@ -26,6 +27,8 @@ test_qdrant/
 # Dev stuff
 .env
 session.json
+.opencode/
+MEMORY.md
 
 # OS noise
 .DS_Store

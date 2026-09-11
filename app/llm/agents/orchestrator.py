@@ -158,9 +158,7 @@ class AgentOrchestrator:
             context.token_budget = max(0, context.token_budget - review_context.tokens_used)
 
         # Compile final result
-        final_reply = self._compile_final_reply(
-            execution_result, planner_result, review_result, primary_agent_type
-        )
+        final_reply = self._compile_final_reply(execution_result)
 
         total_tool_calls = sum(r.tool_calls_made for r in execution_results)
         total_rounds = sum(r.rounds_used for r in execution_results)
@@ -199,25 +197,9 @@ class AgentOrchestrator:
         except Exception:
             return ""
 
-    def _compile_final_reply(
-        self,
-        execution_result: AgentResult,
-        planner_result: Optional[AgentResult],
-        review_result: Optional[AgentResult],
-        primary_agent: AgentType,
-    ) -> str:
+    def _compile_final_reply(self, execution_result: AgentResult) -> str:
         """Compile the final reply to return to the user."""
-        parts = []
-
-        if planner_result:
-            parts.append(f"## Plan\n{planner_result.reply}")
-
-        parts.append(f"## {primary_agent.value.capitalize()} Agent Output\n{execution_result.reply}")
-
-        if review_result:
-            parts.append(f"## Review\n{review_result.reply}")
-
-        return "\n\n".join(parts)
+        return execution_result.reply
 
     def get_agent(self, agent_type: AgentType):
         """Get a specific agent instance."""

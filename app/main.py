@@ -112,7 +112,7 @@ def create_app() -> FastAPI:
         eviction=eviction,
         n_ctx=selected_config["n_ctx"],
         reserve_for_response=settings.reserve_for_response,
-        ttl_days=settings.session_ttl_days,
+        ttl_minutes=settings.session_ttl_minutes,
         max_sessions_per_user=settings.max_sessions_per_user,
         embedding_service=embedding_service,
         vector_store_factory=vector_store_factory,

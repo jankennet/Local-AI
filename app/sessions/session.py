@@ -65,11 +65,9 @@ class Session:
             self.init_vector_store(embedding_service, store_factory)
 
     def add_to_vector_store(self, role: str, content: str, turn_index: int, embedding_service: EmbeddingService = None, store_factory: Optional[Callable[[EmbeddingService], VectorStore]] = None) -> None:
-        if content.strip():
-            if self._vector_store is None and embedding_service:
-                self._ensure_vector_store(embedding_service, store_factory)
-            if self._vector_store:
-                self._vector_store.add(content, {"turn_index": turn_index, "role": role})
+        """Add to vector store only if already initialized (lazy init happens in build_messages/retrieve_relevant)."""
+        if content.strip() and self._vector_store:
+            self._vector_store.add(content, {"turn_index": turn_index, "role": role})
 
     def retrieve_relevant(self, query: str, top_k: int = None, initial_k: int = None, use_reranker: bool = None, use_dedup: bool = None, embedding_service: EmbeddingService = None, store_factory: Optional[Callable[[EmbeddingService], VectorStore]] = None) -> List[Tuple[float, str, dict]]:
         if self._vector_store is None and embedding_service:
@@ -149,10 +147,13 @@ class Session:
         budget: int,
         counter: TokenCounter,
     ) -> list:
-        """Trim history from oldest to fit within token budget."""
+        """Trim history to fit within token budget, keeping the MOST RECENT
+        messages and dropping the oldest. Chat semantics require that the
+        current user turn (newest) is always present, so if nothing fits we
+        still keep the newest message (compressing it if possible)."""
         if not history:
             return []
-        
+
         # Count tokens for each message
         msg_tokens = []
         total = 0
@@ -161,27 +162,33 @@ class Session:
             tokens = counter.count(content) + 4  # +4 for role/overhead
             msg_tokens.append((tokens, msg))
             total += tokens
-        
+
         if total <= budget:
             return history
-        
-        # Remove oldest messages until we fit
-        kept = []
+
+        # Keep newest messages first (drop oldest instead).
+        kept_newest_first = []
         kept_tokens = 0
-        for tokens, msg in msg_tokens:
+        for tokens, msg in reversed(msg_tokens):
             if kept_tokens + tokens <= budget:
-                kept.append(msg)
+                kept_newest_first.append(msg)
                 kept_tokens += tokens
-            else:
-                # Try to compress this message
+                continue
+            # This message doesn't fit. If we haven't kept anything yet, we
+            # must keep the newest message anyway — the model needs to see
+            # the current turn to respond to it.
+            if not kept_newest_first:
                 content = msg.get("content") or ""
                 remaining = budget - kept_tokens
                 if remaining > 50:
                     compressed = self._compress_turn(content, remaining - 4, counter)
-                    kept.append({**msg, "content": compressed})
-                break
-        
-        return kept
+                    kept_newest_first.append({**msg, "content": compressed})
+                else:
+                    kept_newest_first.append(msg)
+            break
+
+        # Restore chronological order for the prompt.
+        return list(reversed(kept_newest_first))
 
     def build_messages(
         self,
@@ -197,6 +204,9 @@ class Session:
         if not token_counter:
             # Fallback to simple behavior
             msgs = [{"role": "system", "content": self.system_prompt}]
+            # Initialize vector store lazily on first RAG query
+            if use_rag and self._vector_store is None and embedding_service:
+                self._ensure_vector_store(embedding_service, vector_store_factory)
             if use_rag and query and self._vector_store:
                 recent_context = " ".join(
                     (m.get("content") or "") for m in self.history[-3:] if m.get("content")
@@ -229,9 +239,13 @@ class Session:
         
         msgs = [{"role": "system", "content": self.system_prompt}]
         
+        # Initialize vector store lazily on first RAG query
+        if use_rag and self._vector_store is None and embedding_service:
+            self._ensure_vector_store(embedding_service, vector_store_factory)
+
         # Add RAG context if enabled
         rag_msgs = []
-        if use_rag and query and (self._vector_store or embedding_service):
+        if use_rag and query and self._vector_store:
             recent_context = " ".join(
                 (m.get("content") or "") for m in self.history[-3:] if m.get("content")
             )

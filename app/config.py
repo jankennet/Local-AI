@@ -31,7 +31,7 @@ class Settings:
     reserve_for_response: int = 768
     reserve_for_response_min: int = 256      # Minimum reserve for short queries
     reserve_for_response_max: int = 2048     # Maximum reserve for complex queries
-    session_ttl_days: int = 30
+    session_ttl_minutes: int = 60
     cleanup_interval_seconds: int = 3600
     llama_server_bin: str = "llama.cpp/build/bin/llama-server"
     internal_port: int = 8081
@@ -101,7 +101,7 @@ def load_settings() -> Settings:
         reserve_for_response=int(os.environ.get("LLM_RESERVE_FOR_RESPONSE", "768")),
         reserve_for_response_min=int(os.environ.get("LLM_RESERVE_FOR_RESPONSE_MIN", "256")),
         reserve_for_response_max=int(os.environ.get("LLM_RESERVE_FOR_RESPONSE_MAX", "2048")),
-        session_ttl_days=int(os.environ.get("LLM_SESSION_TTL_DAYS", "30")),
+        session_ttl_minutes=int(os.environ.get("LLM_SESSION_TTL_MINUTES", "60")),
         cleanup_interval_seconds=int(os.environ.get("LLM_CLEANUP_INTERVAL_SECONDS", "3600")),
         llama_server_bin=os.environ.get("LLM_LLAMA_SERVER_BIN", "llama.cpp/build/bin/llama-server"),
         internal_port=int(os.environ.get("LLM_INTERNAL_PORT", "8081")),

@@ -14,24 +14,54 @@ and nothing else in the app needs to change (DIP).
 
 from functools import lru_cache
 from typing import Protocol
+import logging
+
+logger = logging.getLogger(__name__)
+
+# Try to import llama_cpp, but don't fail if not available
+try:
+    from llama_cpp import Llama
+    LLAMA_CPP_AVAILABLE = True
+except ImportError:
+    Llama = None
+    LLAMA_CPP_AVAILABLE = False
 
 
 class TokenCounter(Protocol):
     def count(self, text: str) -> int: ...
 
 
+class SimpleTokenCounter:
+    """Fallback token counter using rough estimation (~4 chars per token)."""
+    
+    def count(self, text: str) -> int:
+        if not text:
+            return 0
+        # Rough estimate: ~4 characters per token
+        return max(1, len(text) // 4)
+
+
 class LlamaVocabTokenCounter:
     """Exact token counts via the model's own tokenizer, weights not loaded."""
 
     def __init__(self, model_path: str):
-        from llama_cpp import Llama
-        self._vocab = Llama(model_path=model_path, vocab_only=True, verbose=False)
-        self._count_cache = lru_cache(maxsize=1024)(self._count_uncached)
+        try:
+            from llama_cpp import Llama
+            self._vocab = Llama(model_path=model_path, vocab_only=True, verbose=False)
+            self._count_cache = lru_cache(maxsize=1024)(self._count_uncached)
+            logger.info("Using exact LlamaVocabTokenCounter")
+        except ImportError:
+            logger.warning("llama_cpp not available, falling back to SimpleTokenCounter")
+            self._fallback = SimpleTokenCounter()
+            self._vocab = None
+            self._count_cache = lru_cache(maxsize=1024)(self._count_uncached)
 
     def _count_uncached(self, text: str) -> int:
         if not text:
             return 0
-        return len(self._vocab.tokenize(text.encode("utf-8")))
+        if self._vocab is not None:
+            return len(self._vocab.tokenize(text.encode("utf-8")))
+        return self._fallback.count(text)
 
     def count(self, text: str) -> int:
         return self._count_cache(text)

@@ -293,6 +293,7 @@ class QdrantVectorStore:
     """
     Persistent vector store using Qdrant (embedded or server mode).
     Supports hybrid search, payload filtering, and scalable persistence.
+    Falls back to in-memory SimpleVectorStore if Qdrant is unavailable.
     """
 
     def __init__(
@@ -304,15 +305,28 @@ class QdrantVectorStore:
     ):
         self._embeddings = embedding_service
         self._collection_name = collection_name
+        self._client = None
+        self._fallback = None
         
         # Support both embedded (path) and server (url) modes
-        if url:
-            self._client = QdrantClient(url=url)
-        else:
-            self._client = QdrantClient(path=path)
-        self._ensure_collection()
+        # Try to connect, fall back to in-memory if unavailable
+        try:
+            if url:
+                self._client = QdrantClient(url=url)
+            else:
+                self._client = QdrantClient(path=path)
+            # Test the connection by listing collections
+            self._client.get_collections()
+            self._ensure_collection()
+            logger.info(f"QdrantVectorStore connected ({'server' if url else 'embedded'})")
+        except Exception as e:
+            logger.warning(f"Qdrant unavailable, falling back to in-memory store: {e}")
+            self._fallback = SimpleVectorStore(embedding_service)
+            self._client = None
 
     def _ensure_collection(self) -> None:
+        if self._fallback:
+            return  # Using fallback, no collection needed
         collections = self._client.get_collections().collections
         names = [c.name for c in collections]
         if self._collection_name not in names:
@@ -342,6 +356,9 @@ class QdrantVectorStore:
                 )
 
     def add(self, text: str, metadata: dict) -> str:
+        if self._fallback is not None:
+            self._fallback.add(text, metadata)
+            return str(uuid.uuid4())  # Return dummy ID for fallback
         point_id = str(uuid.uuid4())
         vec = self._embeddings.embed_single(text).tolist()
         payload = {"text": text, **metadata}
@@ -357,6 +374,8 @@ class QdrantVectorStore:
         top_k: int = 5,
         filter: Optional[qmodels.Filter] = None,
     ) -> List[Tuple[float, str, dict]]:
+        if self._fallback is not None:
+            return self._fallback.search(query, top_k)
         q_vec = self._embeddings.embed_single(query).tolist()
         results = self._client.query_points(
             collection_name=self._collection_name,
@@ -368,13 +387,20 @@ class QdrantVectorStore:
         return [(r.score, r.payload["text"], {k: v for k, v in r.payload.items() if k != "text"}) for r in results.points]
 
     def clear(self) -> None:
+        if self._fallback is not None:
+            self._fallback.clear()
+            return
         self._client.delete_collection(collection_name=self._collection_name)
         self._ensure_collection()
 
     def count(self) -> int:
+        if self._fallback is not None:
+            return len(self._fallback)
         return self._client.count(collection_name=self._collection_name, exact=True).count
 
     def __len__(self) -> int:
+        if self._fallback is not None:
+            return len(self._fallback)
         return self.count()
 
 
