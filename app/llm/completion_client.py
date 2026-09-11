@@ -28,9 +28,9 @@ from ..metrics import record_completion
 
 
 class CompletionClient(Protocol):
-    def complete(self, messages: list, max_tokens: int, temperature: float) -> str: ...
+    async def complete(self, messages: list, max_tokens: int, temperature: float) -> str: ...
 
-    def complete_with_tools(
+    async def complete_with_tools(
         self, messages: list, tools: list, max_tokens: int, temperature: float
     ) -> dict: ...
 
@@ -49,16 +49,16 @@ class LoopbackCompletionClient:
         self._model_name = model_name
         self._client = httpx.AsyncClient(timeout=httpx.Timeout(300.0))
 
-    def complete(self, messages: list, max_tokens: int, temperature: float) -> str:
-        message = self._post_sync(messages, None, max_tokens, temperature)
+    async def complete(self, messages: list, max_tokens: int, temperature: float) -> str:
+        message = await self._post_async(messages, None, max_tokens, temperature)
         return message.get("content") or ""
 
-    def complete_with_tools(
+    async def complete_with_tools(
         self, messages: list, tools: list, max_tokens: int, temperature: float
     ) -> dict:
-        return self._post_sync(messages, tools, max_tokens, temperature)
+        return await self._post_async(messages, tools, max_tokens, temperature)
 
-    def _post_sync(
+    async def _post_async(
         self, messages: list, tools: Optional[list], max_tokens: int, temperature: float
     ) -> dict:
         payload = {"messages": messages, "max_tokens": max_tokens, "temperature": temperature}
@@ -66,7 +66,7 @@ class LoopbackCompletionClient:
             payload["tools"] = tools
         start = time.time()
         try:
-            resp = httpx.post(self._url, json=payload, timeout=300.0)
+            resp = await self._client.post(self._url, json=payload, timeout=300.0)
             resp.raise_for_status()
             data = resp.json()
             choice = data["choices"][0]
@@ -91,7 +91,8 @@ class LoopbackCompletionClient:
             "stream": True,
         }
         start = time.time()
-        total_tokens = 0
+        prompt_tokens = 0
+        completion_tokens = 0
         try:
             async with self._client.stream("POST", self._url, json=payload) as resp:
                 resp.raise_for_status()
@@ -105,11 +106,15 @@ class LoopbackCompletionClient:
                             delta = chunk.get("choices", [{}])[0].get("delta", {})
                             content = delta.get("content")
                             if content:
-                                total_tokens += 1
+                                completion_tokens += 1
                                 yield content
+                            usage = chunk.get("usage")
+                            if usage:
+                                prompt_tokens = usage.get("prompt_tokens", prompt_tokens)
+                                completion_tokens = usage.get("completion_tokens", completion_tokens)
                         except json.JSONDecodeError:
                             continue
-            record_completion(self._model_name, time.time() - start, 0, total_tokens)
+            record_completion(self._model_name, time.time() - start, prompt_tokens, completion_tokens)
         except Exception as e:
             record_completion(self._model_name, time.time() - start, 0, 0, error=type(e).__name__)
             raise
@@ -128,6 +133,8 @@ class LoopbackCompletionClient:
         start = time.time()
         tool_calls_buffer = []
         content_buffer = ""
+        prompt_tokens = 0
+        completion_tokens = 0
         try:
             async with self._client.stream("POST", self._url, json=payload) as resp:
                 resp.raise_for_status()
@@ -140,14 +147,12 @@ class LoopbackCompletionClient:
                             chunk = json.loads(data_str)
                             choice = chunk.get("choices", [{}])[0]
                             delta = choice.get("delta", {})
-                            
-                            # Handle content streaming
+
                             content = delta.get("content")
                             if content:
                                 content_buffer += content
                                 yield {"type": "content", "content": content}
-                            
-                            # Handle tool calls streaming
+
                             tool_calls = delta.get("tool_calls")
                             if tool_calls:
                                 for tc in tool_calls:
@@ -161,15 +166,18 @@ class LoopbackCompletionClient:
                                     if tc.get("function", {}).get("arguments"):
                                         tool_calls_buffer[index]["function"]["arguments"] += tc["function"]["arguments"]
                                 yield {"type": "tool_calls", "tool_calls": tool_calls_buffer.copy()}
-                            
-                            # Check for finish reason
+
                             finish_reason = choice.get("finish_reason")
                             if finish_reason:
+                                usage = chunk.get("usage")
+                                if usage:
+                                    prompt_tokens = usage.get("prompt_tokens", 0)
+                                    completion_tokens = usage.get("completion_tokens", 0)
                                 yield {"type": "finish", "finish_reason": finish_reason, "content": content_buffer, "tool_calls": tool_calls_buffer}
                                 break
                         except json.JSONDecodeError:
                             continue
-            record_completion(self._model_name, time.time() - start, 0, len(content_buffer) // 4)
+            record_completion(self._model_name, time.time() - start, prompt_tokens, completion_tokens or len(content_buffer) // 4)
         except Exception as e:
             record_completion(self._model_name, time.time() - start, 0, 0, error=type(e).__name__)
             raise

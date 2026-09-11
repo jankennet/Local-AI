@@ -14,7 +14,7 @@ class TestSettings:
         assert settings.port == 8000
         assert settings.models_dir == "models"
         assert settings.reserve_for_response == 768
-        assert settings.session_ttl_days == 30
+        assert settings.session_ttl_minutes == 60
         assert settings.embedding_model == "sentence-transformers/all-MiniLM-L6-v2"
         assert settings.rag_top_k == 5
         assert settings.rag_initial_k == 20

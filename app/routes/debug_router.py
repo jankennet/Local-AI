@@ -97,19 +97,12 @@ def build_debug_router(
         vs = _get_vector_store(embedding_service, vector_backend, vector_db_path, vector_collection, qdrant_server_url)
 
         filter_ = None
-        if req.session_id and vector_backend == "qdrant":
-            from qdrant_client.http import models as qmodels
-            filter_ = qmodels.Filter(
-                must=[qmodels.FieldCondition(key="session", match=qmodels.MatchValue(value=req.session_id))]
-            )
+        if req.session_id:
+            filter_ = {"session_id": req.session_id}
 
-        # SimpleVectorStore doesn't support filter
-        if filter_:
-            try:
-                results = vs.search(req.query, top_k=req.top_k, filter=filter_)
-            except TypeError:
-                results = vs.search(req.query, top_k=req.top_k)
-        else:
+        try:
+            results = vs.search(req.query, top_k=req.top_k, filter=filter_)
+        except TypeError:
             results = vs.search(req.query, top_k=req.top_k)
 
         return VectorSearchResponse(

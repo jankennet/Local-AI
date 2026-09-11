@@ -109,6 +109,7 @@ def _build_command(binary: str, model_path: str, host: str, port: int, config: d
         "--n-gpu-layers", str(config.get("n_gpu_layers", 99)),
         "--ctx-size", str(config["n_ctx"]),
         "-b", str(config["n_batch"]),
+        "--parallel", "1",
         "--jinja",
     ]
     if config["kv_quant"]:

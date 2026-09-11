@@ -2,6 +2,8 @@
 Researcher Agent: Specialized in information gathering, RAG, and knowledge synthesis.
 """
 
+from typing import AsyncGenerator
+
 from .base import BaseAgent, AgentContext, AgentResult, AgentType
 
 
@@ -45,7 +47,7 @@ class ResearcherAgent(BaseAgent):
         context.rag_initial_k = max(context.rag_initial_k, 30)
         context.rag_top_k = max(context.rag_top_k, 10)
 
-        messages = self._build_messages_with_system(context, use_rag=True)
+        messages = self._build_messages_with_system(context)
         tool_schemas = [t["schema"] for t in self._get_filtered_tools(context).values()]
 
         reply, rounds_used, tool_calls_made = await self._run_tool_loop(
@@ -59,3 +61,9 @@ class ResearcherAgent(BaseAgent):
             rounds_used=rounds_used,
             metadata={"research_task": True, "enhanced_rag": True},
         )
+
+    async def _stream(self, context: AgentContext) -> AsyncGenerator[dict, None]:
+        context.rag_initial_k = max(context.rag_initial_k, 30)
+        context.rag_top_k = max(context.rag_top_k, 10)
+        async for event in super()._stream(context):
+            yield event

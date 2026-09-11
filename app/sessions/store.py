@@ -11,6 +11,7 @@ This means store.py never changes when you swap tokenizer, storage
 backend, or eviction policy — only the composition root (main.py) does.
 """
 
+import asyncio
 import logging
 import time
 import uuid
@@ -48,6 +49,9 @@ class SessionStore:
         self._embedding_service = embedding_service
         self._vector_store_factory = vector_store_factory
         self._sessions: Dict[str, Session] = self._repo.load()
+        # Persistence batching: add_turn marks dirty, flush() persists in bulk
+        self._dirty = False
+        self._mutations = 0
         # Vector stores are lazily initialized on first RAG query (build_messages with use_rag=True)
 
     @property
@@ -116,7 +120,12 @@ class SessionStore:
                     oldest_time = s.last_active
                     oldest = sid
         if oldest:
-            del self._sessions[oldest]
+            s = self._sessions.pop(oldest)
+            if s._vector_store is not None:
+                try:
+                    s._vector_store.delete_by_filter({"session_id": oldest})
+                except Exception as e:
+                    logger.warning(f"Failed to clean up vectors for {oldest[:8]}: {e}")
             self._repo.save(self._sessions)
 
     def get_by_external_id(self, external_id: str) -> Optional[Session]:
@@ -140,7 +149,12 @@ class SessionStore:
         return self._sessions.get(session_id)
 
     def delete(self, session_id: str) -> None:
-        self._sessions.pop(session_id, None)
+        s = self._sessions.pop(session_id, None)
+        if s is not None and s._vector_store is not None:
+            try:
+                s._vector_store.delete_by_filter({"session_id": session_id})
+            except Exception as e:
+                logger.warning(f"Failed to clean up vectors for {session_id[:8]}: {e}")
         self._repo.save(self._sessions)
 
     def list_sessions(self) -> List[Session]:
@@ -160,11 +174,13 @@ class SessionStore:
                 embedding_service=self._embedding_service,
             )
         
-        # Vector store is initialized lazily in build_messages when use_rag=True
-        # No longer calling add_to_vector_store here to avoid eager Qdrant connection
+        # Index new turn into vector store if it's already initialized
+        if s._vector_store and content.strip():
+            s.add_to_vector_store(role, content, turn_index)
         
         self._eviction.evict(s, self._counter, self.budget)
-        self._repo.save(self._sessions)
+        self._dirty = True
+        self._mutations += 1
         
         # Record token usage metrics
         try:
@@ -201,7 +217,30 @@ class SessionStore:
             if now - s.last_active > self._get_session_ttl_seconds(s.external_id)
         ]
         for sid in expired:
-            del self._sessions[sid]
+            s = self._sessions.pop(sid)
+            if s._vector_store is not None:
+                try:
+                    s._vector_store.delete_by_filter({"session_id": sid})
+                except Exception as e:
+                    logger.warning(f"Failed to clean up vectors for {sid[:8]}: {e}")
         if expired:
             self._repo.save(self._sessions)
         return len(expired)
+
+    # ---- persistence batching ---------------------------------------------
+
+    async def flush(self) -> None:
+        """Persist to disk if any add_turn calls happened since last flush.
+
+        Builds a snapshot of the current in-memory state and writes it to
+        disk via a thread (the JSON fsync is blocking I/O). Uses a
+        mutation counter so we don't clear dirty if a new add_turn arrived
+        during the write.
+        """
+        if not self._dirty:
+            return
+        snapshot = {sid: s.to_dict() for sid, s in self._sessions.items()}
+        start_count = self._mutations
+        await asyncio.to_thread(self._repo.save_raw, snapshot)
+        if self._mutations == start_count:
+            self._dirty = False

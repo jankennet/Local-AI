@@ -27,7 +27,7 @@ class TestSessionsRouter:
         from app.llm.completion_client import CompletionClient
         
         # Mock completion client
-        def mock_complete_with_tools(messages, tool_schemas, max_tokens, temperature):
+        async def mock_complete_with_tools(messages, tool_schemas, max_tokens, temperature):
             return {
                 "content": "Test response",
                 "tool_calls": None,

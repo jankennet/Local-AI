@@ -4,7 +4,7 @@ Multi-Agent Orchestrator: Routes tasks to specialized agents and coordinates exe
 
 import logging
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import AsyncGenerator, Optional
 
 from .base import AgentContext, AgentResult, AgentType
 from .classifier import ClassificationResult, get_classifier
@@ -200,6 +200,96 @@ class AgentOrchestrator:
     def _compile_final_reply(self, execution_result: AgentResult) -> str:
         """Compile the final reply to return to the user."""
         return execution_result.reply
+
+    # ---- streaming variant ------------------------------------------------
+
+    async def execute_stream(
+        self,
+        context: AgentContext,
+        force_agent: Optional[AgentType] = None,
+    ) -> AsyncGenerator[dict, None]:
+        """Execute with real-time streaming. Yields content_delta + done events.
+
+        Planning and review run non-streaming (only the primary agent streams).
+        """
+        agents_used = []
+        execution_results = []
+        planner_result = None
+        review_result = None
+
+        session_context = self._get_session_context(context.store, context.session_id)
+        classification = self._classifier.classify(context.query, session_context)
+        primary_agent_type = force_agent or classification.agent_type
+        logger.info(
+            f"Orchestrator stream: classified as {primary_agent_type.value} "
+            f"(confidence: {classification.confidence:.2f})"
+        )
+
+        if self._enable_planning and classification.requires_planning and primary_agent_type != AgentType.PLANNER:
+            plan_budget = int(context.token_budget * 0.15) if context.token_budget > 0 else 1024
+            planner_context = AgentContext(
+                session_id=context.session_id,
+                query=f"Create a detailed execution plan for: {context.query}",
+                store=context.store,
+                completion_client=context.completion_client,
+                tools=context.tools,
+                max_tokens=context.max_tokens,
+                temperature=0.3,
+                rag_top_k=context.rag_top_k,
+                rag_initial_k=context.rag_initial_k,
+                use_reranker=context.use_reranker,
+                tool_timeout=context.tool_timeout,
+                max_retries=context.max_retries,
+                token_budget=plan_budget,
+                max_tool_calls=5,
+                max_rounds=4,
+            )
+            planner_result = await self._agents[AgentType.PLANNER].execute(planner_context)
+            agents_used.append(AgentType.PLANNER)
+            execution_results.append(planner_result)
+            context.query = f"{context.query}\n\n## Execution Plan\n{planner_result.reply}"
+            context.metadata["plan"] = planner_result.reply
+            context.token_budget = max(0, context.token_budget - planner_context.tokens_used)
+
+        primary_agent = self._agents[primary_agent_type]
+        primary_reply = ""
+        async for event in primary_agent._stream(context):
+            yield event
+            if event.get("type") == "done":
+                primary_reply = event.get("reply", "")
+        agents_used.append(primary_agent_type)
+
+        if (
+            self._enable_review
+            and primary_agent_type in (AgentType.CODE_READER, AgentType.CODE_WRITER, AgentType.RESEARCHER, AgentType.PLANNER)
+            and not force_agent
+        ):
+            review_budget = int(context.token_budget * 0.10) if context.token_budget > 0 else 512
+            review_context = AgentContext(
+                session_id=context.session_id,
+                query=(
+                    f"Review the following output from the {primary_agent_type.value} agent:\n\n"
+                    f"Original task: {context.query.split(chr(10))[0] if context.query else 'N/A'}\n\n"
+                    f"Agent output:\n{primary_reply}"
+                ),
+                store=context.store,
+                completion_client=context.completion_client,
+                tools=context.tools,
+                max_tokens=context.max_tokens,
+                temperature=0.2,
+                rag_top_k=context.rag_top_k,
+                rag_initial_k=context.rag_initial_k,
+                use_reranker=context.use_reranker,
+                tool_timeout=context.tool_timeout,
+                max_retries=context.max_retries,
+                token_budget=review_budget,
+                max_tool_calls=3,
+                max_rounds=3,
+            )
+            review_result = await self._agents[AgentType.REVIEWER].execute(review_context)
+            agents_used.append(AgentType.REVIEWER)
+            execution_results.append(review_result)
+            context.token_budget = max(0, context.token_budget - review_context.tokens_used)
 
     def get_agent(self, agent_type: AgentType):
         """Get a specific agent instance."""

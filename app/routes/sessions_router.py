@@ -197,6 +197,8 @@ def build_sessions_router(
             # Update session token metrics
             set_session_tokens(session_id, store.tokens_used(session_id), store.budget)
 
+            await store.flush()
+
             return ChatResponse(
                 session_id=session_id,
                 reply=reply,
@@ -224,6 +226,8 @@ def build_sessions_router(
 
             # Update session token metrics
             set_session_tokens(session_id, store.tokens_used(session_id), store.budget)
+
+            await store.flush()
 
             return ChatResponse(
                 session_id=session_id,
@@ -285,6 +289,7 @@ def build_sessions_router(
             
             # Update session token metrics
             set_session_tokens(session_id, store.tokens_used(session_id), store.budget)
+            await store.flush()
             
         except WebSocketDisconnect:
             logger.info(f"WebSocket disconnected for session {session_id}")
@@ -358,13 +363,16 @@ def build_sessions_router(
                                 max_rounds=12,
                             )
 
-                            result = await orchestrator.execute(context, force_agent=force_agent)
-                            # Stream the final reply as a single content_delta then done
-                            yield {"event": "content_delta", "data": json.dumps({"type": "content_delta", "data": {"content": result.final_reply}})}
-                            yield {"event": "done", "data": json.dumps({"type": "done", "data": {"reply": result.final_reply}})}
+                            async for event in orchestrator.execute_stream(context, force_agent=force_agent):
+                                if event["type"] == "content_delta":
+                                    yield {"event": "content_delta", "data": json.dumps({"type": "content_delta", "data": {"content": event["content"]}})}
+                                elif event["type"] == "done":
+                                    yield {"event": "done", "data": json.dumps({"type": "done", "data": {"reply": event["reply"]}})}
+                                    break
                             
                             # Update session token metrics
                             set_session_tokens(session_id, store.tokens_used(session_id), store.budget)
+                            await store.flush()
                             return
                         except Exception as e:
                             logger.exception("Orchestrator streaming failed: %s", e)
@@ -394,6 +402,7 @@ def build_sessions_router(
                     
                     # Update session token metrics
                     set_session_tokens(session_id, store.tokens_used(session_id), store.budget)
+                    await store.flush()
                 except Exception as e:
                     logger.error(f"SSE error for session {session_id}: {e}")
                     yield {"event": "error", "data": json.dumps({"type": "error", "data": {"message": str(e)}})}

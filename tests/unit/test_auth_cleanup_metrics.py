@@ -27,70 +27,51 @@ class TestAuth:
         import importlib
         import app.config
         importlib.reload(app.config)
-        import app.auth_keys
-        importlib.reload(app.auth_keys)
         import app.auth
         importlib.reload(app.auth)
         return app.auth.verify_api_key
 
     def test_verify_api_key_valid(self, monkeypatch):
-        self._setup_auth(monkeypatch, "expected-key")
-        
+        verify = self._setup_auth(monkeypatch, "expected-key")
+
         app = FastAPI()
-        
+
         @app.get("/test")
-        async def test_endpoint(api_key: str = Depends(verify_api_key)):
+        async def test_endpoint(api_key: str = Depends(verify)):
             return {"validated": True}
-        
+
         client = TestClient(app)
-        
-        # Need to create a valid key in the store first
-        from app.auth_keys import init_key_store, Scope
-        import tempfile
-        import os
-        
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
-            f.write('{}')
-            temp_path = f.name
-        
-        try:
-            store = init_key_store(temp_path)
-            plaintext, _ = store.create_key(
-                name="test",
-                scopes=[Scope.READ, Scope.WRITE],
-            )
-            response = client.get("/test", headers={"X-API-Key": plaintext})
-            assert response.status_code == 200
-            assert response.json()["validated"] is True
-        finally:
-            os.unlink(temp_path)
+
+        response = client.get("/test", headers={"X-API-Key": "expected-key"})
+        assert response.status_code == 200
+        assert response.json()["validated"] is True
 
     def test_verify_api_key_invalid(self, monkeypatch):
-        self._setup_auth(monkeypatch, "expected-key")
-        
+        verify = self._setup_auth(monkeypatch, "expected-key")
+
         app = FastAPI()
-        
+
         @app.get("/test")
-        async def test_endpoint(api_key: str = Depends(verify_api_key)):
+        async def test_endpoint(api_key: str = Depends(verify)):
             return {"validated": True}
-        
+
         client = TestClient(app)
-        
+
         # Invalid key format
         response = client.get("/test", headers={"X-API-Key": "wrong-key"})
         assert response.status_code == 401
 
     def test_verify_api_key_missing(self, monkeypatch):
-        self._setup_auth(monkeypatch, "expected-key")
-        
+        verify = self._setup_auth(monkeypatch, "expected-key")
+
         app = FastAPI()
-        
+
         @app.get("/test")
-        async def test_endpoint(api_key: str = Depends(verify_api_key)):
+        async def test_endpoint(api_key: str = Depends(verify)):
             return {"validated": True}
-        
+
         client = TestClient(app)
-        
+
         response = client.get("/test")
         # Header(...) makes it required, so 422 for missing header
         assert response.status_code in (401, 422)
@@ -109,7 +90,6 @@ class TestCleanup:
             repository=repo,
             eviction=SummarizeOldestStrategy(),
             n_ctx=4096,
-            ttl_days=0,  # Expire immediately
             embedding_service=mock_embedding_service,
         )
         
@@ -134,7 +114,6 @@ class TestCleanup:
             repository=repo,
             eviction=SummarizeOldestStrategy(),
             n_ctx=4096,
-            ttl_days=0,
             embedding_service=mock_embedding_service,
         )
         

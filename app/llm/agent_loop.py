@@ -123,7 +123,7 @@ async def run_agent_turn(
         # so we use tool_call_temperature for all rounds that could produce tool calls
         current_temperature = settings.tool_call_temperature
 
-        message = completion_client.complete_with_tools(
+        message = await completion_client.complete_with_tools(
             messages, tool_schemas, dynamic_max_tokens, current_temperature
         )
 

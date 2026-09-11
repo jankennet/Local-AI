@@ -57,7 +57,7 @@ class Session:
         for i, msg in enumerate(self.history):
             content = msg.get("content") or ""
             if content.strip():
-                self._vector_store.add(content, {"turn_index": i, "role": msg.get("role")})
+                self._vector_store.add(content, {"turn_index": i, "role": msg.get("role"), "session_id": self.session_id})
 
     def _ensure_vector_store(self, embedding_service: EmbeddingService, store_factory: Optional[Callable[[EmbeddingService], VectorStore]] = None) -> None:
         """Ensure vector store is initialized (lazy initialization)."""
@@ -67,7 +67,7 @@ class Session:
     def add_to_vector_store(self, role: str, content: str, turn_index: int, embedding_service: EmbeddingService = None, store_factory: Optional[Callable[[EmbeddingService], VectorStore]] = None) -> None:
         """Add to vector store only if already initialized (lazy init happens in build_messages/retrieve_relevant)."""
         if content.strip() and self._vector_store:
-            self._vector_store.add(content, {"turn_index": turn_index, "role": role})
+            self._vector_store.add(content, {"turn_index": turn_index, "role": role, "session_id": self.session_id})
 
     def retrieve_relevant(self, query: str, top_k: int = None, initial_k: int = None, use_reranker: bool = None, use_dedup: bool = None, embedding_service: EmbeddingService = None, store_factory: Optional[Callable[[EmbeddingService], VectorStore]] = None) -> List[Tuple[float, str, dict]]:
         if self._vector_store is None and embedding_service:
@@ -85,8 +85,9 @@ class Session:
         if use_dedup is None:
             use_dedup = settings.rag_dedup_enabled
         
-        # Stage 1: Broad vector search
-        candidates = self._vector_store.search(query, initial_k)
+        # Stage 1: Broad vector search (scoped to this session only)
+        filter_ = {"session_id": self.session_id}
+        candidates = self._vector_store.search(query, initial_k, filter=filter_)
         
         # Stage 2: Rerank with cross-encoder
         if use_reranker and len(candidates) > top_k:

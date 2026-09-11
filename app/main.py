@@ -73,6 +73,16 @@ def resolve_model_path() -> tuple[str, str]:
     return path, vram_tier
 
 
+async def _persistence_loop(store: SessionStore, interval: float = 1.0) -> None:
+    """Background task: flush dirty session state to disk periodically."""
+    try:
+        while True:
+            await asyncio.sleep(interval)
+            await store.flush()
+    except asyncio.CancelledError:
+        pass
+
+
 def create_app() -> FastAPI:
     model_path, vram_tier = resolve_model_path()
     
@@ -132,10 +142,27 @@ def create_app() -> FastAPI:
             settings.llama_server_bin, model_path, "127.0.0.1", settings.internal_port,
             vram_tier, process_holder, config_holder,
         ))
+        persist_task = asyncio.create_task(_persistence_loop(store))
         yield
+        persist_task.cancel()
         cleanup_task.cancel()
         watchdog_task.cancel()
-        terminate_process(process_holder["process"])  # stop the native llama-server subprocess too
+        # Final persistence flush before shutdown
+        try:
+            await asyncio.wait_for(store.flush(), timeout=2.0)
+        except Exception:
+            pass
+        try:
+            await asyncio.wait_for(completion_client.aclose(), timeout=2.0)
+        except Exception:
+            pass
+        close_repo = getattr(repository, "close", None)
+        if callable(close_repo):
+            try:
+                close_repo()
+            except Exception:
+                pass
+        terminate_process(process_holder["process"])
 
     app = FastAPI(lifespan=lifespan)
     app.include_router(build_sessions_router(

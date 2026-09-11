@@ -252,7 +252,8 @@ class VectorStore(Protocol):
     """Protocol for vector stores — enables swapping backends without changing callers."""
 
     def add(self, text: str, metadata: dict) -> None: ...
-    def search(self, query: str, top_k: int = 5) -> List[Tuple[float, str, dict]]: ...
+    def search(self, query: str, top_k: int = 5, filter: Optional[dict] = None) -> List[Tuple[float, str, dict]]: ...
+    def delete_by_filter(self, filter: dict) -> None: ...
     def clear(self) -> None: ...
     def __len__(self) -> int: ...
 
@@ -272,13 +273,29 @@ class SimpleVectorStore:
         self._texts.append(text)
         self._metadata.append(metadata)
 
-    def search(self, query: str, top_k: int = 5) -> List[Tuple[float, str, dict]]:
+    def search(self, query: str, top_k: int = 5, filter: Optional[dict] = None) -> List[Tuple[float, str, dict]]:
         if not self._vectors:
             return []
         q_vec = self._embeddings.embed_single(query)
         sims = np.dot(np.stack(self._vectors), q_vec)
-        idx = np.argsort(sims)[::-1][:top_k]
-        return [(float(sims[i]), self._texts[i], self._metadata[i]) for i in idx]
+        idx = np.argsort(sims)[::-1]
+
+        results = []
+        for i in idx:
+            if len(results) >= top_k:
+                break
+            if filter and not all(self._metadata[i].get(k) == v for k, v in filter.items()):
+                continue
+            results.append((float(sims[i]), self._texts[i], self._metadata[i]))
+        return results
+
+    def delete_by_filter(self, filter: dict) -> None:
+        if not filter:
+            return
+        keep = [i for i, m in enumerate(self._metadata) if not all(m.get(k) == v for k, v in filter.items())]
+        self._vectors = [self._vectors[i] for i in keep]
+        self._texts = [self._texts[i] for i in keep]
+        self._metadata = [self._metadata[i] for i in keep]
 
     def clear(self) -> None:
         self._vectors.clear()
@@ -368,23 +385,45 @@ class QdrantVectorStore:
         )
         return point_id
 
+    def _to_filter(self, filter: Optional[dict]) -> Optional[qmodels.Filter]:
+        """Convert a plain ``{key: value}`` filter dict to a Qdrant filter."""
+        if not filter:
+            return None
+        must = [
+            qmodels.FieldCondition(key=k, match=qmodels.MatchValue(value=v))
+            for k, v in filter.items()
+        ]
+        return qmodels.Filter(must=must)
+
     def search(
         self,
         query: str,
         top_k: int = 5,
-        filter: Optional[qmodels.Filter] = None,
+        filter: Optional[dict] = None,
     ) -> List[Tuple[float, str, dict]]:
         if self._fallback is not None:
-            return self._fallback.search(query, top_k)
+            return self._fallback.search(query, top_k, filter)
         q_vec = self._embeddings.embed_single(query).tolist()
         results = self._client.query_points(
             collection_name=self._collection_name,
             query=q_vec,
             limit=top_k,
-            query_filter=filter,
+            query_filter=self._to_filter(filter),
             with_payload=True,
         )
         return [(r.score, r.payload["text"], {k: v for k, v in r.payload.items() if k != "text"}) for r in results.points]
+
+    def delete_by_filter(self, filter: dict) -> None:
+        if self._fallback is not None:
+            self._fallback.delete_by_filter(filter)
+            return
+        qfilter = self._to_filter(filter)
+        if qfilter is None:
+            return
+        self._client.delete(
+            collection_name=self._collection_name,
+            points_selector=qmodels.FilterSelector(filter=qfilter),
+        )
 
     def clear(self) -> None:
         if self._fallback is not None:

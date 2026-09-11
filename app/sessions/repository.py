@@ -27,6 +27,9 @@ class SessionRepository(ABC):
     @abstractmethod
     def save(self, sessions: Dict[str, Session]) -> None: ...
 
+    @abstractmethod
+    def save_raw(self, data: Dict[str, dict]) -> None: ...
+
 
 class JSONSessionRepository(SessionRepository):
     """
@@ -65,17 +68,15 @@ class JSONSessionRepository(SessionRepository):
             return {}
 
     def save(self, sessions: Dict[str, Session]) -> None:
+        self.save_raw({sid: s.to_dict() for sid, s in sessions.items()})
+
+    def save_raw(self, data: Dict[str, dict]) -> None:
         with _lock:
-            # Write to temp file
             with open(self._temp_path, "w") as f:
-                json.dump({sid: s.to_dict() for sid, s in sessions.items()}, f)
+                json.dump(data, f)
                 f.flush()
-                os.fsync(f.fileno())  # Ensure data reaches disk
-            
-            # Atomic replace (POSIX guarantees atomicity)
+                os.fsync(f.fileno())
             os.replace(self._temp_path, self.path)
-            
-            # fsync the directory to ensure the rename is durable
             dir_fd = os.open(self.path.parent, os.O_DIRECTORY)
             try:
                 os.fsync(dir_fd)
@@ -125,27 +126,22 @@ class SQLiteSessionRepository(SessionRepository):
         return result
     
     def save(self, sessions: Dict[str, Session]) -> None:
-        # Use a transaction for atomicity
+        self.save_raw({sid: s.to_dict() for sid, s in sessions.items()})
+
+    def save_raw(self, data: Dict[str, dict]) -> None:
         cursor = self._conn.cursor()
         try:
             cursor.execute("BEGIN IMMEDIATE")
-            
-            # Get existing session IDs
             existing = {row[0] for row in cursor.execute("SELECT session_id FROM sessions")}
-            current = set(sessions.keys())
-            
-            # Delete removed sessions
+            current = set(data.keys())
             for sid in existing - current:
                 cursor.execute("DELETE FROM sessions WHERE session_id = ?", (sid,))
-            
-            # Upsert current sessions
-            for sid, session in sessions.items():
-                data = json.dumps(session.to_dict())
+            for sid, session_dict in data.items():
+                json_data = json.dumps(session_dict)
                 cursor.execute(
                     "INSERT OR REPLACE INTO sessions (session_id, data, created_at, last_active) VALUES (?, ?, ?, ?)",
-                    (sid, data, session.created_at, session.last_active)
+                    (sid, json_data, session_dict.get("created_at", 0.0), session_dict.get("last_active", 0.0)),
                 )
-            
             cursor.execute("COMMIT")
         except Exception:
             cursor.execute("ROLLBACK")

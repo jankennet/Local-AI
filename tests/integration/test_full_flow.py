@@ -75,7 +75,8 @@ class TestSessionWithRAG:
     @pytest.fixture
     def session_with_rag(self, mock_tokenizer, mock_embedding_service, temp_dir, monkeypatch):
         monkeypatch.setenv("LLM_RAG_TOKEN_BUDGET", "2000")
-        monkeypatch.setenv("LLM_BUDGET_RAG_PCT", "0.3")
+        monkeypatch.setenv("LLM_BUDGET_RAG_PCT", "0.2")
+        monkeypatch.setenv("LLM_BUDGET_HISTORY_PCT", "0.54")
         
         # Reload settings to pick up new env vars
         import importlib
@@ -209,7 +210,7 @@ class TestToolFlow:
         )
         
         assert "File created" in reply
-        assert call_count == 3  # tool check -> tool execution -> final response
+        assert call_count == 2  # tool call round -> final response
         
         # Check file was written
         import os

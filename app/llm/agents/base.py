@@ -7,7 +7,7 @@ import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Optional
+from typing import Any, AsyncGenerator, Callable, Optional
 
 from ..completion_client import CompletionClient
 from ..tools import TOOLS
@@ -89,9 +89,15 @@ class BaseAgent(ABC):
         return {k: v for k, v in context.tools.items() if k in self.allowed_tools}
 
     def _build_messages_with_system(
-        self, context: AgentContext, use_rag: bool = True
+        self, context: AgentContext, use_rag: bool = None
     ) -> list:
-        """Build messages including this agent's system prompt."""
+        """Build messages including this agent's system prompt.
+
+        When *use_rag* is None (the default), defer to context.use_rag so
+        callers don't have to remember to pass the flag through.
+        """
+        if use_rag is None:
+            use_rag = context.use_rag
         messages = context.store.build_messages(
             context.session_id,
             use_rag=use_rag,
@@ -145,7 +151,7 @@ class BaseAgent(ABC):
 
             current_temperature = settings.tool_call_temperature
 
-            message = context.completion_client.complete_with_tools(
+            message = await context.completion_client.complete_with_tools(
                 messages, tool_schemas, context.max_tokens, current_temperature
             )
 
@@ -195,6 +201,120 @@ class BaseAgent(ABC):
             rounds_used,
             tool_calls_made,
         )
+
+    # ---- streaming variant ------------------------------------------------
+
+    async def _run_tool_loop_stream(
+        self,
+        context: AgentContext,
+        messages: list,
+        tool_schemas: list,
+        max_rounds: int = 8,
+    ) -> AsyncGenerator[dict, None]:
+        """Streaming tool-calling loop. Yields content_delta and done events.
+
+        Each content_delta contains {"type":"content_delta","content":"..."}.
+        The final event is {"type":"done","reply":"..."}.
+        """
+        rounds_used = 0
+        tool_calls_made = 0
+        effective_max_rounds = context.max_rounds if context.max_rounds > 0 else max_rounds
+        effective_max_tool_calls = context.max_tool_calls if context.max_tool_calls > 0 else 20
+
+        for _ in range(effective_max_rounds):
+            rounds_used += 1
+            record_agent_turn(context.session_id, f"{self.agent_type.value}_round")
+
+            if context.tokens_used >= context.token_budget:
+                reply = "Token budget exhausted. Stopping early."
+                context.store.add_turn(context.session_id, "assistant", reply)
+                record_agent_turn(context.session_id, "assistant")
+                yield {"type": "content_delta", "content": reply}
+                yield {"type": "done", "reply": reply}
+                return
+
+            if tool_calls_made >= effective_max_tool_calls:
+                reply = "Tool call limit reached. Stopping early."
+                context.store.add_turn(context.session_id, "assistant", reply)
+                record_agent_turn(context.session_id, "assistant")
+                yield {"type": "content_delta", "content": reply}
+                yield {"type": "done", "reply": reply}
+                return
+
+            current_temperature = settings.tool_call_temperature
+            tool_calls_buffer: list[dict] = []
+            content_buffer = ""
+            tool_calls_complete = False
+            finish_reason = None
+
+            async for chunk in context.completion_client.complete_with_tools_stream(
+                messages, tool_schemas, context.max_tokens, current_temperature
+            ):
+                if chunk["type"] == "content":
+                    content_buffer += chunk["content"]
+                    yield {"type": "content_delta", "content": chunk["content"]}
+                elif chunk["type"] == "tool_calls":
+                    tool_calls_buffer = chunk["tool_calls"]
+                elif chunk["type"] == "finish":
+                    finish_reason = chunk.get("finish_reason")
+                    content_buffer = chunk.get("content", content_buffer)
+                    tool_calls_buffer = chunk.get("tool_calls", tool_calls_buffer)
+                    if finish_reason == "tool_calls" and tool_calls_buffer:
+                        tool_calls_complete = True
+                    break
+
+            tool_calls = [
+                tc for tc in tool_calls_buffer
+                if tc.get("id") and tc.get("function", {}).get("name")
+            ]
+
+            if not tool_calls_complete or not tool_calls:
+                if content_buffer:
+                    context.store.add_turn(context.session_id, "assistant", content_buffer)
+                    record_agent_turn(context.session_id, "assistant")
+                    if hasattr(context.store, '_counter'):
+                        context.tokens_used += context.store._counter.count(content_buffer)
+                    else:
+                        context.tokens_used += len(content_buffer) // 4
+                    yield {"type": "done", "reply": content_buffer}
+                    return
+                continue
+
+            context.store.add_turn(
+                context.session_id, "assistant", content_buffer or "", tool_calls=tool_calls
+            )
+            record_agent_turn(context.session_id, "assistant")
+
+            results = await self._execute_tools_parallel(context, tool_calls)
+            tool_calls_made += len(tool_calls)
+
+            for call, result in zip(tool_calls, results):
+                context.store.add_turn(
+                    context.session_id, "tool", result, tool_call_id=call["id"]
+                )
+                record_agent_turn(context.session_id, "tool")
+                if hasattr(context.store, '_counter'):
+                    context.tokens_used += context.store._counter.count(result)
+                else:
+                    context.tokens_used += len(result) // 4
+
+            messages = context.store.build_messages(context.session_id, use_rag=False)
+            if hasattr(context.store, '_counter'):
+                for msg in messages:
+                    if msg.get("content"):
+                        context.tokens_used += context.store._counter.count(msg["content"])
+
+        reply = "Stopped after too many tool calls — try breaking the task into smaller steps."
+        yield {"type": "content_delta", "content": reply}
+        yield {"type": "done", "reply": reply}
+
+    async def _stream(self, context: AgentContext) -> AsyncGenerator[dict, None]:
+        """Streaming execution entry point. Subclasses that adjust context
+        parameters before building messages should override this."""
+        messages = self._build_messages_with_system(context)
+        tool_schemas = [t["schema"] for t in self._get_filtered_tools(context).values()]
+        async for event in self._run_tool_loop_stream(context, messages, tool_schemas, max_rounds=8):
+            yield event
 
     async def _execute_tools_parallel(
         self, context: AgentContext, tool_calls: list

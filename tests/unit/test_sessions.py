@@ -597,7 +597,8 @@ class TestSQLiteSessionRepository:
 class TestSessionStoreWithRepositories:
     """Integration tests for SessionStore with different repositories."""
     
-    def test_session_store_with_json_repo(self, mock_embedding_service, mock_tokenizer, temp_dir):
+    @pytest.mark.asyncio
+    async def test_session_store_with_json_repo(self, mock_embedding_service, mock_tokenizer, temp_dir):
         repo = JSONSessionRepository(str(temp_dir / "sessions.json"))
         store = SessionStore(
             counter=mock_tokenizer,
@@ -610,6 +611,7 @@ class TestSessionStoreWithRepositories:
         session = store.create_session("device-1")
         store.add_turn(session.session_id, "user", "Hello")
         store.add_turn(session.session_id, "assistant", "Hi there!")
+        await store.flush()
         
         # Verify persistence by creating new store instance
         new_repo = JSONSessionRepository(str(temp_dir / "sessions.json"))
@@ -625,7 +627,8 @@ class TestSessionStoreWithRepositories:
         assert loaded is not None
         assert len(loaded.history) == 2
 
-    def test_session_store_with_sqlite_repo(self, mock_embedding_service, mock_tokenizer, temp_dir):
+    @pytest.mark.asyncio
+    async def test_session_store_with_sqlite_repo(self, mock_embedding_service, mock_tokenizer, temp_dir):
         repo = SQLiteSessionRepository(str(temp_dir / "sessions.db"))
         store = SessionStore(
             counter=mock_tokenizer,
@@ -638,6 +641,7 @@ class TestSessionStoreWithRepositories:
         session = store.create_session("device-1")
         store.add_turn(session.session_id, "user", "Hello")
         store.add_turn(session.session_id, "assistant", "Hi there!")
+        await store.flush()
         
         # Verify persistence by creating new store instance
         new_repo = SQLiteSessionRepository(str(temp_dir / "sessions.db"))

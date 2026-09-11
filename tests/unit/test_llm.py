@@ -171,45 +171,50 @@ class TestTools:
         importlib.reload(app.llm.tools)
         return app.llm.tools
 
-    def test_read_file_tool(self, workspace_dir):
+    @pytest.mark.asyncio
+    async def test_read_file_tool(self, workspace_dir):
         tools = self._reload_tools_with_workspace(workspace_dir)
         test_file = workspace_dir / "test.txt"
         test_file.write_text("Hello, world!")
         
-        result = tools.read_file("test.txt")
+        result = await tools.read_file("test.txt")
         
         assert "Hello, world!" in result
 
-    def test_write_file_tool(self, workspace_dir):
+    @pytest.mark.asyncio
+    async def test_write_file_tool(self, workspace_dir):
         tools = self._reload_tools_with_workspace(workspace_dir)
-        result = tools.write_file("new.txt", "New content")
+        result = await tools.write_file("new.txt", "New content")
         
         assert "Wrote" in result
         assert (workspace_dir / "new.txt").read_text() == "New content"
 
-    def test_list_dir_tool(self, workspace_dir):
+    @pytest.mark.asyncio
+    async def test_list_dir_tool(self, workspace_dir):
         tools = self._reload_tools_with_workspace(workspace_dir)
         (workspace_dir / "file1.txt").write_text("1")
         (workspace_dir / "file2.txt").write_text("2")
         (workspace_dir / "subdir").mkdir()
         
-        result = tools.list_dir(".")
+        result = await tools.list_dir(".")
         
         assert "file1.txt" in result
         assert "file2.txt" in result
         assert "subdir" in result
 
-    def test_run_bash_disabled_by_default(self):
+    @pytest.mark.asyncio
+    async def test_run_bash_disabled_by_default(self):
         tools = self._reload_tools_with_workspace(Path("/tmp/workspace"))
         os.environ.pop("LLM_ALLOW_SHELL", None)
-        result = tools.run_bash("echo hello")
+        result = await tools.run_bash("echo hello")
         assert "disabled" in result.lower()
 
-    def test_run_bash_enabled(self, workspace_dir):
+    @pytest.mark.asyncio
+    async def test_run_bash_enabled(self, workspace_dir):
         tools = self._reload_tools_with_workspace(workspace_dir)
         os.environ["LLM_ALLOW_SHELL"] = "1"
         
-        result = tools.run_bash("echo hello")
+        result = await tools.run_bash("echo hello")
         
         assert "hello" in result
 
@@ -243,13 +248,21 @@ class TestAgentLoop:
     @pytest.mark.asyncio
     async def test_execute_tools_parallel(self, mock_tokenizer):
         """Test parallel tool execution."""
+        from unittest.mock import AsyncMock
+
+        async def tool_a() -> str:
+            return "result_a"
+
+        async def tool_b() -> str:
+            return "result_b"
+
         tools = {
             "tool_a": {
-                "fn": lambda: "result_a",
+                "fn": tool_a,
                 "schema": {"type": "function", "function": {"name": "tool_a"}},
             },
             "tool_b": {
-                "fn": lambda: "result_b",
+                "fn": tool_b,
                 "schema": {"type": "function", "function": {"name": "tool_b"}},
             },
         }
@@ -279,8 +292,7 @@ class TestAgentLoopIntegration:
         # Mock completion client (async)
         mock_client = AsyncMock(spec=CompletionClient)
         mock_client.complete_with_tools.side_effect = [
-            {"content": "Hello! How can I help?", "tool_calls": None},  # First call: tool check
-            {"content": "Hello! How can I help?", "tool_calls": None},  # Second call: final response
+            {"content": "Hello! How can I help?", "tool_calls": None},  # Final response
         ]
         
         repo = JSONSessionRepository(str(temp_dir / "sessions.json"))
@@ -304,4 +316,4 @@ class TestAgentLoopIntegration:
         )
         
         assert reply == "Hello! How can I help?"
-        assert mock_client.complete_with_tools.call_count == 2
+        assert mock_client.complete_with_tools.call_count == 1

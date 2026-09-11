@@ -43,7 +43,7 @@ class CodeWriterAgent(BaseAgent):
         )
 
     async def execute(self, context: AgentContext) -> AgentResult:
-        messages = self._build_messages_with_system(context, use_rag=True)
+        messages = self._build_messages_with_system(context)
         tool_schemas = [t["schema"] for t in self._get_filtered_tools(context).values()]
 
         # Use context's max_rounds if set, otherwise default to 12 for writer
