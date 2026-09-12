@@ -123,6 +123,25 @@ class QueryClassifier:
         best_agent = max(scores, key=scores.get)
         best_score = scores[best_agent]
 
+        # Explanatory how-to / deep-dive requests stay with GENERAL even when
+        # they trip PLANNER keywords like "steps"; the General agent answers
+        # with the concise generalized summary (and notes a full deep-dive
+        # isn't possible). Genuine project planning keeps going to PLANNER.
+        EXPLAIN_MARKERS = ["explain", "deep dive", "full detail", "detailed explanation", "help me with", "walk me through", "guide me through"]
+        PLAN_MARKERS = ["plan", "build", "design", "architect", "architecture", "roadmap", "project", "feature", "system design", "decompose", "break down"]
+
+        def _has_whole_word(markers, text):
+            return any(re.search(rf"\b{re.escape(m)}\b", text) for m in markers)
+
+        if (
+            best_agent == AgentType.PLANNER
+            and _has_whole_word(EXPLAIN_MARKERS, query_lower)
+            and not _has_whole_word(PLAN_MARKERS, query_lower)
+        ):
+            best_agent = AgentType.GENERAL
+            best_score = scores[AgentType.GENERAL]
+            matches.setdefault(AgentType.GENERAL, []).append("explanatory how-to request")
+
         # Default to GENERAL if no strong signals
         if best_score < 0.5:
             return ClassificationResult(

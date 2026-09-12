@@ -14,6 +14,7 @@ from typing import AsyncGenerator, Optional
 
 from ..sessions.store import SessionStore
 from .completion_client import CompletionClient
+from .continuation import stream_text_continuation
 from .tools import TOOLS
 from ..metrics import (
     record_agent_round, record_agent_turn, record_tool_call,
@@ -119,12 +120,16 @@ async def run_agent_turn_streaming(
             use_reranker=use_reranker,
         )
 
-        current_temperature = settings.tool_call_temperature
+        current_temperature = (
+            settings.final_response_temperature if not tool_schemas else settings.tool_call_temperature
+        )
 
         # Stream the completion with tools
         tool_calls_buffer = []
         content_buffer = ""
         tool_calls_complete = False
+        finish_reason = None
+        truncated = False
         
         async for chunk in completion_client.complete_with_tools_stream(
             messages, tool_schemas, dynamic_max_tokens, current_temperature
@@ -162,6 +167,42 @@ async def run_agent_turn_streaming(
                             round_num=round_num
                         )
                         return
+                    break
+                elif finish_reason == "length":
+                    # Model hit the per-call token cap mid-answer: continue
+                    # streaming below until it stops naturally.
+                    truncated = True
+                    break
+        
+        if truncated and content_buffer:
+            remaining = max(0, store.budget - store.tokens_used(session_id))
+            count_tokens = store._counter.count if hasattr(store, '_counter') else None
+            continuation_reply = None
+            async for event in stream_text_continuation(
+                completion_client,
+                messages,
+                content_buffer,
+                current_temperature,
+                remaining_budget=remaining,
+                count_tokens=count_tokens,
+            ):
+                if event["type"] == "content_delta":
+                    yield StreamEvent(
+                        type="content_delta",
+                        data={"content": event["content"]},
+                        round_num=round_num
+                    )
+                elif event["type"] == "done":
+                    continuation_reply = event["reply"]
+            content_buffer = continuation_reply or content_buffer
+            store.add_turn(session_id, "assistant", content_buffer)
+            record_agent_turn(session_id, "assistant")
+            yield StreamEvent(
+                type="done",
+                data={"reply": content_buffer},
+                round_num=round_num
+            )
+            return
         
         if not tool_calls_complete or not tool_calls_buffer:
             # No tool calls, we're done

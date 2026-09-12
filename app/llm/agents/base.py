@@ -10,6 +10,7 @@ from enum import Enum
 from typing import Any, AsyncGenerator, Callable, Optional
 
 from ..completion_client import CompletionClient
+from ..continuation import continue_text, stream_text_continuation
 from ..tools import TOOLS
 from ...metrics import record_agent_turn, record_tool_call
 from ...sessions.store import SessionStore
@@ -149,7 +150,9 @@ class BaseAgent(ABC):
                 record_agent_turn(context.session_id, "assistant")
                 return reply, rounds_used, tool_calls_made
 
-            current_temperature = settings.tool_call_temperature
+            current_temperature = (
+                settings.final_response_temperature if not tool_schemas else settings.tool_call_temperature
+            )
 
             message = await context.completion_client.complete_with_tools(
                 messages, tool_schemas, context.max_tokens, current_temperature
@@ -158,6 +161,20 @@ class BaseAgent(ABC):
             tool_calls = message.get("tool_calls")
             if not tool_calls:
                 reply = message.get("content") or ""
+                if message.get("finish_reason") == "length":
+                    # The model hit its per-call token cap mid-answer.
+                    # Continue generating until it stops naturally.
+                    remaining = max(0, context.token_budget - context.tokens_used)
+                    count_tokens = context.store._counter.count if hasattr(context.store, '_counter') else None
+                    reply, _completed, continuation_tokens = await continue_text(
+                        context.completion_client,
+                        messages,
+                        reply,
+                        current_temperature,
+                        remaining_budget=remaining,
+                        count_tokens=count_tokens,
+                    )
+                    context.tokens_used += continuation_tokens
                 context.store.add_turn(context.session_id, "assistant", reply)
                 record_agent_turn(context.session_id, "assistant")
                 # Estimate tokens for the reply
@@ -241,7 +258,9 @@ class BaseAgent(ABC):
                 yield {"type": "done", "reply": reply}
                 return
 
-            current_temperature = settings.tool_call_temperature
+            current_temperature = (
+                settings.final_response_temperature if not tool_schemas else settings.tool_call_temperature
+            )
             tool_calls_buffer: list[dict] = []
             content_buffer = ""
             tool_calls_complete = False
@@ -270,6 +289,25 @@ class BaseAgent(ABC):
 
             if not tool_calls_complete or not tool_calls:
                 if content_buffer:
+                    if finish_reason == "length":
+                        # Model hit the per-call token cap mid-answer: keep
+                        # streaming a continuation until it stops naturally.
+                        remaining = max(0, context.token_budget - context.tokens_used)
+                        count_tokens = context.store._counter.count if hasattr(context.store, '_counter') else None
+                        continuation_reply = None
+                        async for event in stream_text_continuation(
+                            context.completion_client,
+                            messages,
+                            content_buffer,
+                            current_temperature,
+                            remaining_budget=remaining,
+                            count_tokens=count_tokens,
+                        ):
+                            if event["type"] == "content_delta":
+                                yield event
+                            elif event["type"] == "done":
+                                continuation_reply = event["reply"]
+                        content_buffer = continuation_reply or content_buffer
                     context.store.add_turn(context.session_id, "assistant", content_buffer)
                     record_agent_turn(context.session_id, "assistant")
                     if hasattr(context.store, '_counter'):

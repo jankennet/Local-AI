@@ -17,6 +17,7 @@ from typing import Optional
 
 from ..sessions.store import SessionStore
 from .completion_client import CompletionClient
+from .continuation import continue_text
 from .tools import TOOLS
 from ..metrics import (
     record_agent_round, record_agent_turn, record_tool_call,
@@ -118,10 +119,12 @@ async def run_agent_turn(
             use_reranker=use_reranker,
         )
 
-        # Adaptive temperature: low for tool calling, higher for final response
-        # We don't know if this will be the final round until after the call,
-        # so we use tool_call_temperature for all rounds that could produce tool calls
-        current_temperature = settings.tool_call_temperature
+        # Adaptive temperature: low for tool calling, higher for final response.
+        # Rounds without tool schemas (plain chat) are always final text, so use
+        # the natural-output temperature; tool-using rounds stay deterministic.
+        current_temperature = (
+            settings.final_response_temperature if not tool_schemas else settings.tool_call_temperature
+        )
 
         message = await completion_client.complete_with_tools(
             messages, tool_schemas, dynamic_max_tokens, current_temperature
@@ -131,6 +134,19 @@ async def run_agent_turn(
         if not tool_calls:
             # This is the final response - use higher temperature for natural output
             reply = message.get("content") or ""
+            if message.get("finish_reason") == "length":
+                # Model hit the per-call token cap mid-answer: continue until
+                # it stops naturally (bounded by the session context budget).
+                remaining = max(0, store.budget - store.tokens_used(session_id))
+                count_tokens = store._counter.count if hasattr(store, '_counter') else None
+                reply, _completed, _used = await continue_text(
+                    completion_client,
+                    messages,
+                    reply,
+                    current_temperature,
+                    remaining_budget=remaining,
+                    count_tokens=count_tokens,
+                )
             store.add_turn(session_id, "assistant", reply)
             record_agent_turn(session_id, "assistant")
             return reply

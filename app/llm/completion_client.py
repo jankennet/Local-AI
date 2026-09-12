@@ -71,6 +71,9 @@ class LoopbackCompletionClient:
             data = resp.json()
             choice = data["choices"][0]
             message = choice["message"]
+            # Expose why generation stopped ("stop", "length", "tool_calls") so
+            # callers can detect truncated replies and continue them.
+            message["finish_reason"] = choice.get("finish_reason")
             usage = data.get("usage", {})
             prompt_tokens = usage.get("prompt_tokens", 0)
             completion_tokens = usage.get("completion_tokens", 0)
