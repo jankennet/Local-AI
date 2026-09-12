@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from ..config import settings
+from .web_search import search_duckduckgo
 
 logger = logging.getLogger(__name__)
 
@@ -332,6 +333,22 @@ async def run_bash(command: str) -> str:
         return f"Error running command: {type(e).__name__}: {e}"
 
 
+async def web_search(query: str, num_results: int = 5) -> str:
+    start = time.time()
+    try:
+        result = await search_duckduckgo(query, num_results)
+        failed = result.startswith("Error:")
+        _log_tool_call("web_search", {"query": query, "num_results": num_results}, start, not failed, None if not failed else result)
+        if failed:
+            return result
+        # Search output is already compact (titles + snippets) — the content
+        # IS the answer, so truncate for safety but keep it unmodified.
+        return _truncate(result)
+    except Exception as e:
+        _log_tool_call("web_search", {"query": query, "num_results": num_results}, start, False, str(e))
+        return f"Error running web search: {type(e).__name__}: {e}"
+
+
 TOOLS = {
     "read_file": {
         "fn": read_file,
@@ -391,6 +408,24 @@ TOOLS = {
                     "type": "object",
                     "properties": {"command": {"type": "string"}},
                     "required": ["command"],
+                },
+            },
+        },
+    },
+    "web_search": {
+        "fn": web_search,
+        "schema": {
+            "type": "function",
+            "function": {
+                "name": "web_search",
+                "description": "Search the web and return the top matching results with title, URL, and snippet. Use when you need current or external information.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "The search query."},
+                        "num_results": {"type": "integer", "description": "Number of results to return (1-10).", "default": 5},
+                    },
+                    "required": ["query"],
                 },
             },
         },

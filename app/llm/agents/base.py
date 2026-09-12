@@ -114,6 +114,17 @@ class BaseAgent(ABC):
         else:
             messages.insert(0, {"role": "system", "content": self.system_prompt})
 
+        # Hard safety net: the agent prompt was added on top of the store's
+        # messages, so re-clamp the whole list against the session's real
+        # context-window budget (n_ctx − reserve). Don't use token_budget
+        # here: the orchestrator shaves it down per agent as a running-cost
+        # counter, which has nothing to do with what fits in the window.
+        counter = getattr(context.store, "_counter", None)
+        clamp_budget = getattr(context.store, "budget", 0) or context.token_budget
+        if clamp_budget > 0 and counter is not None:
+            from ...sessions.session import _clamp_messages
+            messages = _clamp_messages(messages, clamp_budget, counter)
+
         return messages
 
     async def _run_tool_loop(

@@ -24,11 +24,12 @@ Capabilities:
 - Creative writing and content generation
 - General problem-solving
 - Light file operations (read/list)
+- Web search for current or external information
 - Coordinate with other agents when needed
 
 Guidelines:
 - Be helpful, accurate, and concise
-- Use tools when they add value (reading files, listing directories)
+- Use tools when they add value (reading files, listing directories, searching the web)
 - If a task clearly belongs to a specialist (coding, research, planning), note that in your response
 - Ask clarifying questions when the request is ambiguous
 
@@ -46,7 +47,7 @@ class GeneralAgent(BaseAgent):
             name="General",
             description="Handles general-purpose tasks and questions",
             system_prompt=GENERAL_SYSTEM_PROMPT,
-            allowed_tools=["read_file", "list_dir", "write_file"],
+            allowed_tools=["read_file", "list_dir", "write_file", "web_search"],
         )
 
     async def execute(self, context: AgentContext) -> AgentResult:

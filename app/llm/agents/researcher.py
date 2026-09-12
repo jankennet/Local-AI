@@ -12,6 +12,7 @@ RESEARCHER_SYSTEM_PROMPT = """You are a Research Agent. You specialize in gather
 Capabilities:
 - Search conversation history via RAG (semantic search)
 - Read files to gather context
+- Search the web for current or external information (web_search tool)
 - Analyze and summarize large amounts of information
 - Compare and contrast different sources
 - Extract key insights and patterns
@@ -20,8 +21,9 @@ Capabilities:
 Guidelines:
 - Use RAG heavily — it's your primary tool for finding relevant context
 - Read multiple sources to cross-reference information
+- Use web_search for current events, facts, and anything outside your training data
 - Synthesize findings into clear, structured answers
-- Cite sources (file paths, session turns) when possible
+- Cite sources (file paths, URLs, session turns) when possible
 - Distinguish between facts, assumptions, and opinions
 - If information is missing, say so and suggest where to find it
 
@@ -39,7 +41,7 @@ class ResearcherAgent(BaseAgent):
             name="Researcher",
             description="Gathers and synthesizes information via RAG and file analysis",
             system_prompt=RESEARCHER_SYSTEM_PROMPT,
-            allowed_tools=["read_file", "list_dir"],  # No write/run_bash
+            allowed_tools=["read_file", "list_dir", "web_search"],  # No write/run_bash
         )
 
     async def execute(self, context: AgentContext) -> AgentResult:

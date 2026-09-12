@@ -190,13 +190,19 @@ class SessionStore:
         except Exception:
             pass  # Metrics are best-effort
 
-    def build_messages(self, session_id: str, use_rag: bool = False, query: Optional[str] = None, rag_top_k: int = None, rag_initial_k: int = None, use_reranker: bool = None) -> list:
+    def build_messages(self, session_id: str, use_rag: bool = False, query: Optional[str] = None, rag_top_k: int = None, rag_initial_k: int = None, use_reranker: bool = None, budget: Optional[int] = None) -> list:
+        """Build the message list, slicing per-component budgets from the real
+        context window (store.budget) by default. Pass budget=0 explicitly to
+        revert to the legacy content-derived allocation."""
+        if budget is None:
+            budget = self.budget
         return self._sessions[session_id].build_messages(
             use_rag=use_rag,
             query=query,
             rag_top_k=rag_top_k,
             rag_initial_k=rag_initial_k,
             use_reranker=use_reranker,
+            budget=budget,
             token_counter=self._counter,
             embedding_service=self._embedding_service if use_rag else None,
             vector_store_factory=self._vector_store_factory if use_rag else None,

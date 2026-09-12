@@ -7,7 +7,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from app.sessions.session import Session
+from app.sessions.session import (
+    Session,
+    _clamp_messages,
+    _message_tokens,
+)
 from app.sessions.store import SessionStore
 from app.sessions.repository import JSONSessionRepository, SQLiteSessionRepository
 from app.sessions.eviction import (
@@ -124,6 +128,34 @@ class TestSession:
         rag_msg = next((m for m in messages if "Relevant context" in m.get("content", "")), None)
         assert rag_msg is not None
 
+    def test_build_messages_budget_clamp_with_fat_system(self, mock_embedding_service, mock_tokenizer):
+        """When the real budget is passed, the final list must fit even if the
+        system prompt alone is huge (clamp drops oldest history)."""
+        session = Session(
+            session_id="test-1",
+            system_prompt="s" * 300,
+            history=[
+                {"role": "user", "content": "old turn " * 40},
+                {"role": "user", "content": "final question"},
+            ],
+        )
+        messages = session.build_messages(token_counter=mock_tokenizer, budget=100)
+        total = sum(_message_tokens(m, mock_tokenizer) for m in messages)
+        assert total <= 100
+        assert messages[-1]["role"] == "user"
+        assert "final question" in messages[-1]["content"]
+
+    def test_build_messages_without_budget_no_clamp(self, mock_embedding_service, mock_tokenizer):
+        """Omitting the budget skips the clamp entirely — the system prompt
+        is never truncated (legacy content-derived allocation)."""
+        session = Session(
+            session_id="test-1",
+            system_prompt="s" * 500,
+            history=[{"role": "user", "content": "q" * 500}],
+        )
+        messages = session.build_messages(token_counter=mock_tokenizer)
+        assert messages[0]["content"] == "s" * 500
+
     def test_build_messages_per_component_budgets(self, mock_embedding_service, mock_tokenizer):
         """Test per-component budget allocation."""
         session = Session(
@@ -207,6 +239,95 @@ class TestSession:
         fitted = session._fit_history_to_budget(history, 1, mock_tokenizer)
         
         assert fitted == [{"role": "user", "content": "Hello"}]
+
+    def test_fit_history_keeps_tool_group_atomic(self, mock_embedding_service, mock_tokenizer):
+        """History trimming must never orphan a tool response: an assistant
+        message with tool_calls and its tool reply travel together."""
+        history = [
+            {"role": "assistant", "content": "checking", "tool_calls": [{"id": "tc-1", "function": {"name": "run_bash", "arguments": "{}"}}]},
+            {"role": "tool", "content": "some output", "tool_call_id": "tc-1"},
+            {"role": "user", "content": "Next question"},
+        ]
+        session = Session(session_id="test-1")
+
+        # Budget fits only the newest user turn (drop the whole tool group).
+        fitted = session._fit_history_to_budget(history, 100, mock_tokenizer)
+
+        assert fitted[-1]["role"] == "user"
+        for i, m in enumerate(fitted):
+            if m["role"] == "tool":
+                assert i > 0
+                assert fitted[i - 1]["role"] == "assistant"
+                assert fitted[i - 1].get("tool_calls")
+
+
+class TestClampMessages:
+    def test_noop_when_fits(self, mock_tokenizer):
+        msgs = [
+            {"role": "system", "content": "Be helpful."},
+            {"role": "user", "content": "Hello"},
+        ]
+        out = _clamp_messages(msgs, 100, mock_tokenizer)
+        assert out == msgs
+
+    def test_drops_rag_block_first(self, mock_tokenizer):
+        msgs = [
+            {"role": "system", "content": "[Relevant context]: " + "x" * 400},
+            {"role": "system", "content": "Be helpful."},
+            {"role": "user", "content": "Hello there"},
+        ]
+        out = _clamp_messages(msgs, 30, mock_tokenizer)
+        assert all("[Relevant context]" not in (m.get("content") or "") for m in out)
+        assert out[-1]["role"] == "user"
+        total = sum(_message_tokens(m, mock_tokenizer) for m in out)
+        assert total <= 30
+
+    def test_keeps_newest_user_turn(self, mock_tokenizer):
+        msgs = [
+            {"role": "system", "content": "Be helpful."},
+            {"role": "user", "content": "old question " * 50},
+            {"role": "assistant", "content": "old answer " * 50},
+            {"role": "user", "content": "the critical latest question"},
+        ]
+        out = _clamp_messages(msgs, 40, mock_tokenizer)
+        assert out[-1]["role"] == "user"
+        assert "the critical latest question" in out[-1]["content"]
+        total = sum(_message_tokens(m, mock_tokenizer) for m in out)
+        assert total <= 40 + 8  # tiny slack for the always-present newest turn
+
+    def test_drops_tool_groups_atomically(self, mock_tokenizer):
+        msgs = [
+            {"role": "system", "content": "Be helpful."},
+            {"role": "assistant", "content": "running", "tool_calls": [{"id": "tc-1", "function": {"name": "read_file", "arguments": '{"path": "' + "x" * 300 + '"}'}}]},
+            {"role": "tool", "content": "huge output " * 40, "tool_call_id": "tc-1"},
+            {"role": "user", "content": "What's the result?"},
+        ]
+        out = _clamp_messages(msgs, 35, mock_tokenizer)
+        # Never leave an orphaned tool message.
+        for i, m in enumerate(out):
+            if m["role"] == "tool":
+                assert out[i - 1]["role"] == "assistant"
+                assert out[i - 1].get("tool_calls")
+        assert out[-1]["role"] == "user"
+
+    def test_compress_system_only_as_last_resort(self, mock_tokenizer):
+        system = "Very important system instructions " * 100
+        msgs = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": "Hi"},
+        ]
+        out = _clamp_messages(msgs, 10, mock_tokenizer)
+        # System prompt may only shrink as a last resort — but it must shrink.
+        assert "[truncated]" in out[0]["content"] or len(out[0]["content"]) < len(system)
+
+    def test_input_not_mutated(self, mock_tokenizer):
+        msgs = [
+            {"role": "system", "content": "[Relevant context]: " + "x" * 400},
+            {"role": "user", "content": "Hello"},
+        ]
+        snapshot = [dict(m) for m in msgs]
+        _clamp_messages(msgs, 10, mock_tokenizer)
+        assert msgs == snapshot
 
 
 class TestSessionStore:
@@ -307,6 +428,32 @@ class TestSessionStore:
         )
         
         assert store.budget == 4096 - 768
+
+    def test_store_build_messages_binds_real_budget(self, mock_embedding_service, mock_tokenizer, temp_dir):
+        """store.build_messages() slices from the real context-window budget
+        and the final message list never exceeds it."""
+        from app.sessions.session import _message_tokens
+
+        repo = JSONSessionRepository(str(temp_dir / "sessions.json"))
+        store = SessionStore(
+            counter=mock_tokenizer,
+            repository=repo,
+            eviction=SummarizeOldestStrategy(),
+            n_ctx=200,
+            reserve_for_response=50,
+            embedding_service=mock_embedding_service,
+        )
+        sid = store.create_session("device-1").session_id
+        for i in range(4):
+            store.add_turn(sid, "user", "u" * 60)
+            store.add_turn(sid, "assistant", "a" * 60)
+        store.add_turn(sid, "user", "latest question")
+
+        messages = store.build_messages(sid)
+        total = sum(_message_tokens(m, mock_tokenizer) for m in messages)
+        assert total <= store.budget
+        assert messages[-1]["role"] == "user"
+        assert messages[-1]["content"] == "latest question"
 
     def test_tokens_used(self, mock_embedding_service, mock_tokenizer, temp_dir):
         repo = JSONSessionRepository(str(temp_dir / "sessions.json"))

@@ -10,6 +10,8 @@ native server — they don't need to know a second process exists.
 Validates and transforms requests for llama.cpp compatibility before forwarding.
 """
 
+import asyncio
+import base64
 import json
 import logging
 import sys
@@ -21,12 +23,14 @@ from fastapi.responses import Response, JSONResponse
 import httpx
 
 from ..auth import verify_api_key
+from ..config import settings
 from ..llm.log_buffer import get_log_buffer
 
 logger = logging.getLogger(__name__)
 
-# Endpoints supported by llama.cpp's llama-server
-# NOTE: embeddings is intentionally excluded — llama-server doesn't serve embeddings.
+# Endpoints forwarded to llama.cpp's llama-server.
+# NOTE: embeddings is served in-process from the local EmbeddingService
+# (llama-server can't do it — it loads a chat GGUF, wrong dimensions).
 # Continue's @codebase will fall back to its local embedding provider.
 SUPPORTED_ENDPOINTS = {
     "chat/completions",
@@ -101,7 +105,7 @@ def _is_supported_endpoint(path: str) -> bool:
     return path in SUPPORTED_ENDPOINTS
 
 
-def build_proxy_router(base_url: str) -> APIRouter:
+def build_proxy_router(base_url: str, embedding_service: Optional[Any] = None) -> APIRouter:
     router = APIRouter(dependencies=[Depends(verify_api_key)])
     
     # Shared async HTTP client with connection pooling
@@ -110,6 +114,109 @@ def build_proxy_router(base_url: str) -> APIRouter:
         timeout=httpx.Timeout(300.0),
         limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
     )
+
+    # ---- /v1/embeddings (served in-process, never forwarded) -------------
+
+    @router.post("/v1/embeddings")
+    async def create_embeddings(request: Request):
+        request_id = request.headers.get("X-Request-ID", str(uuid.uuid4())[:8])
+        start_time = time.time()
+
+        if embedding_service is None:
+            duration_ms = int((time.time() - start_time) * 1000)
+            _log_request_line(request_id, request.method, "embeddings", 503, duration_ms, "EMBEDDINGS_UNAVAILABLE")
+            return JSONResponse(
+                content={"error": "Embeddings are not available on this server (no embedding model loaded)."},
+                status_code=503,
+                headers={"X-Request-ID": request_id},
+            )
+        if not settings.embeddings_enabled:
+            duration_ms = int((time.time() - start_time) * 1000)
+            _log_request_line(request_id, request.method, "embeddings", 404, duration_ms, "EMBEDDINGS_DISABLED")
+            return JSONResponse(
+                content={"error": "Embeddings are disabled on this server (set LLM_EMBEDDINGS_ENABLED=true to enable)."},
+                status_code=404,
+                headers={"X-Request-ID": request_id},
+            )
+
+        try:
+            body = await request.json()
+        except Exception:
+            body = None
+
+        if not body or not isinstance(body, dict):
+            return JSONResponse(
+                content={"error": "Invalid request body — expected a JSON object."},
+                status_code=400,
+                headers={"X-Request-ID": request_id},
+            )
+
+        raw_input = body.get("input")
+        if raw_input is None:
+            return JSONResponse(
+                content={"error": "Missing required field 'input'."},
+                status_code=400,
+                headers={"X-Request-ID": request_id},
+            )
+
+        if isinstance(raw_input, str):
+            inputs = [raw_input]
+        elif isinstance(raw_input, list) and all(isinstance(t, str) for t in raw_input):
+            inputs = raw_input
+        else:
+            return JSONResponse(
+                content={"error": "'input' must be a string or an array of strings (token-ID inputs are not supported)."},
+                status_code=400,
+                headers={"X-Request-ID": request_id},
+            )
+
+        if not inputs:
+            return JSONResponse(
+                content={"error": "'input' must not be an empty array."},
+                status_code=400,
+                headers={"X-Request-ID": request_id},
+            )
+
+        model = body.get("model") or embedding_service.model_name
+        encoding_format = body.get("encoding_format", "float")
+
+        try:
+            # Embedding is CPU-bound — run it off the event loop.
+            vectors = await asyncio.to_thread(embedding_service.embed, inputs)
+        except Exception as e:
+            logger.exception("Embeddings request failed")
+            _log_request_line(request_id, request.method, "embeddings", 500, 0, "EMBED_FAILURE")
+            return JSONResponse(
+                content={"error": "Failed to compute embeddings."},
+                status_code=500,
+                headers={"X-Request-ID": request_id},
+            )
+
+        if encoding_format == "base64":
+            import numpy as np
+            encoded = [
+                {"object": "embedding", "index": i, "embedding": base64.b64encode(np.asarray(vec).astype("float32").tobytes()).decode("ascii")}
+                for i, vec in enumerate(vectors)
+            ]
+        else:
+            encoded = [
+                {"object": "embedding", "index": i, "embedding": [round(float(x), 6) for x in vec]}
+                for i, vec in enumerate(vectors)
+            ]
+
+        prompt_tokens = sum(max(1, len(t) // 4) for t in inputs if t)
+        payload = {
+            "object": "list",
+            "data": encoded,
+            "model": model,
+            "usage": {"prompt_tokens": prompt_tokens, "total_tokens": prompt_tokens},
+        }
+
+        duration_ms = int((time.time() - start_time) * 1000)
+        _log_request_line(request_id, request.method, "embeddings", 200, duration_ms)
+        return JSONResponse(content=payload, headers={"X-Request-ID": request_id})
+
+    # ---- proxy to llama-server -------------------------------------------
 
     @router.api_route("/v1/{path:path}", methods=["GET", "POST"])
     async def proxy(path: str, request: Request):

@@ -7,12 +7,155 @@ budget) is deliberately kept in separate collaborators (SRP).
 """
 
 from dataclasses import dataclass, field, asdict, fields
+import json
 import time
 from typing import List, Optional, Tuple, Callable
 
 from ..embeddings import EmbeddingService, VectorStore, rerank, deduplicate_results
 from ..config import settings
 from ..tokenizer import TokenCounter
+
+
+def _message_tokens(msg: dict, counter: TokenCounter) -> int:
+    """Token estimate for a single OpenAI-style message.
+
+    count(content)+4 alone is a safe estimate for plain messages, but
+    assistant messages that carry a tool_calls JSON blob can be far
+    larger — count that payload too, or over-budget sessions sneak past.
+    """
+    total = counter.count(msg.get("content") or "") + 4
+    tool_calls = msg.get("tool_calls")
+    if tool_calls:
+        total += counter.count(json.dumps(tool_calls, ensure_ascii=False))
+    return total
+
+
+def _truncate_text(text: str, max_tokens: int, counter: TokenCounter) -> str:
+    """Compress *text* to roughly *max_tokens*, marking the cut."""
+    tokens = counter.count(text)
+    if max_tokens <= 0 or tokens <= max_tokens:
+        return text
+    ratio = max_tokens / tokens
+    keep_chars = int(len(text) * ratio * 0.9)
+    return text[:max(1, keep_chars)] + "… [truncated]"
+
+
+def _is_rag_block(msg: dict) -> bool:
+    return msg.get("role") == "system" and (msg.get("content") or "").startswith("[Relevant context]")
+
+
+def _is_summary_block(msg: dict) -> bool:
+    return msg.get("role") == "system" and (msg.get("content") or "").startswith("[Earlier conversation summary]")
+
+
+def _pop_group_at(messages: list, index: int) -> list:
+    """Remove the message at *index* plus every tool message answering its
+    tool_calls (they must travel together or the API rejects the request)."""
+    group = [messages.pop(index)]
+    if group[0].get("tool_calls"):
+        ids = {tc["id"] for tc in group[0]["tool_calls"]}
+        while (
+            index < len(messages)
+            and messages[index].get("role") == "tool"
+            and messages[index].get("tool_call_id") in ids
+        ):
+            group.append(messages.pop(index))
+    return group
+
+
+def _clamp_messages(messages: list, budget: int, counter: TokenCounter) -> list:
+    """Hard safety net: shrink a fully-built message list to fit *budget*.
+
+    Drop order (each stage re-measures with accurate tool_calls counting):
+      1. RAG context blocks
+      2. summary block (compress, then drop if it can't be made small)
+      3. oldest history groups, atomically (never orphans a tool response)
+      4. compress the newest user turn — it is never dropped
+      5. last resort: truncate the leading system prompt
+
+    Returns a NEW list; the input is never mutated.
+    """
+    if budget is None or budget <= 0:
+        return messages
+
+    msgs = [dict(m) for m in messages]
+
+    def total() -> int:
+        return sum(_message_tokens(m, counter) for m in msgs)
+
+    if total() <= budget:
+        return msgs
+
+    # 1) Drop RAG context blocks.
+    msgs = [m for m in msgs if not _is_rag_block(m)]
+    if total() <= budget:
+        return msgs
+
+    # 2) Compress / drop the summary block(s).
+    while total() > budget:
+        summary_idx = next((i for i, m in enumerate(msgs) if _is_summary_block(m)), None)
+        if summary_idx is None:
+            break
+        m = msgs[summary_idx]
+        room = budget - (total() - _message_tokens(m, counter))
+        if room < 24:
+            del msgs[summary_idx]
+        else:
+            new_content = _truncate_text(m.get("content") or "", max(8, room), counter)
+            if counter.count(new_content) >= counter.count(m.get("content") or ""):
+                del msgs[summary_idx]  # truncation didn't shrink it
+            else:
+                msgs[summary_idx] = dict(m, content=new_content)
+
+    if total() <= budget:
+        return msgs
+
+    # The newest user turn is sacred — the model needs it to respond.
+    newest_user_idx = None
+    for i in range(len(msgs) - 1, -1, -1):
+        if msgs[i].get("role") == "user":
+            newest_user_idx = i
+            break
+
+    # 3) Drop oldest history groups.
+    while total() > budget:
+        cut = None
+        for i, m in enumerate(msgs):
+            if i == newest_user_idx:
+                continue
+            if m.get("role") != "system":
+                cut = i
+                break
+        if cut is None:
+            break
+        popped = _pop_group_at(msgs, cut)
+        if not popped:
+            break
+        if newest_user_idx is not None and cut < newest_user_idx:
+            newest_user_idx -= len(popped)
+
+    if total() <= budget:
+        return msgs
+
+    # 4) Compress the newest user turn, never dropping it.
+    if newest_user_idx is not None:
+        m = msgs[newest_user_idx]
+        room = budget - (total() - _message_tokens(m, counter))
+        if room > 0:
+            msgs[newest_user_idx] = dict(m, content=_truncate_text(m.get("content") or "", room, counter))
+
+    if total() <= budget:
+        return msgs
+
+    # 5) Last resort — truncate the leading system prompt.
+    sys_idx = next((i for i, m in enumerate(msgs) if m.get("role") == "system"), None)
+    if sys_idx is not None:
+        m = msgs[sys_idx]
+        room = budget - (total() - _message_tokens(m, counter))
+        if room > 0:
+            msgs[sys_idx] = dict(m, content=_truncate_text(m.get("content") or "", max(1, room), counter))
+
+    return msgs
 
 
 @dataclass
@@ -151,45 +294,66 @@ class Session:
         """Trim history to fit within token budget, keeping the MOST RECENT
         messages and dropping the oldest. Chat semantics require that the
         current user turn (newest) is always present, so if nothing fits we
-        still keep the newest message (compressing it if possible)."""
+        still keep the newest message (compressing it if possible).
+
+        History is trimmed by GROUP, not by single message: an assistant
+        turn with tool_calls and the tool messages answering it travel
+        together, so the next /v1/chat/completions call is never handed an
+        orphaned tool_call_id or tool response."""
         if not history:
             return []
 
-        # Count tokens for each message
-        msg_tokens = []
+        # Split into logical groups so tool responses never get orphaned.
+        groups = []
+        i = 0
+        while i < len(history):
+            msg = history[i]
+            group = [msg]
+            i += 1
+            if msg.get("tool_calls"):
+                ids = {tc["id"] for tc in msg["tool_calls"]}
+                while (
+                    i < len(history)
+                    and history[i].get("role") == "tool"
+                    and history[i].get("tool_call_id") in ids
+                ):
+                    group.append(history[i])
+                    i += 1
+            groups.append(group)
+
+        group_tokens = []
         total = 0
-        for msg in history:
-            content = msg.get("content") or ""
-            tokens = counter.count(content) + 4  # +4 for role/overhead
-            msg_tokens.append((tokens, msg))
-            total += tokens
+        for g in groups:
+            t = sum(_message_tokens(m, counter) for m in g)
+            group_tokens.append(t)
+            total += t
 
         if total <= budget:
-            return history
+            return list(history)
 
-        # Keep newest messages first (drop oldest instead).
-        kept_newest_first = []
+        # Keep newest groups first (drop oldest instead).
+        kept_reversed = []
         kept_tokens = 0
-        for tokens, msg in reversed(msg_tokens):
-            if kept_tokens + tokens <= budget:
-                kept_newest_first.append(msg)
-                kept_tokens += tokens
+        for t, g in reversed(list(zip(group_tokens, groups))):
+            if kept_tokens + t <= budget:
+                kept_reversed.append(g)
+                kept_tokens += t
                 continue
-            # This message doesn't fit. If we haven't kept anything yet, we
-            # must keep the newest message anyway — the model needs to see
-            # the current turn to respond to it.
-            if not kept_newest_first:
-                content = msg.get("content") or ""
-                remaining = budget - kept_tokens
-                if remaining > 50:
-                    compressed = self._compress_turn(content, remaining - 4, counter)
-                    kept_newest_first.append({**msg, "content": compressed})
-                else:
-                    kept_newest_first.append(msg)
+            # This group doesn't fit. If we haven't kept anything yet, we
+            # must keep the newest group anyway — the model needs the
+            # current user turn to respond.
+            if not kept_reversed:
+                if len(g) == 1 and g[0].get("role") == "user":
+                    room = budget - kept_tokens
+                    if room > 50:
+                        g = [{**g[0], "content": self._compress_turn(g[0].get("content") or "", room - 4, counter)}]
+                kept_reversed.append(g)
+                kept_tokens += t
             break
 
         # Restore chronological order for the prompt.
-        return list(reversed(kept_newest_first))
+        kept = list(reversed(kept_reversed))
+        return [m for g in kept for m in g]
 
     def build_messages(
         self,
@@ -201,7 +365,15 @@ class Session:
         token_counter: Optional[TokenCounter] = None,
         embedding_service: Optional[EmbeddingService] = None,
         vector_store_factory: Optional[Callable[[EmbeddingService], VectorStore]] = None,
+        budget: Optional[int] = None,
     ) -> list:
+        """Build the message list for this session.
+
+        *budget* — when provided, per-component budgets are derived from the
+        REAL context-window budget (n_ctx − reserve) instead of the current
+        content, and the final list is hard-clamped to fit. When None, the
+        legacy content-derived allocation is used (no clamp).
+        """
         if not token_counter:
             # Fallback to simple behavior
             msgs = [{"role": "system", "content": self.system_prompt}]
@@ -222,14 +394,19 @@ class Session:
             msgs.extend(self.history)
             return msgs
         
-        # Per-component budget allocation
-        total_budget = token_counter.count(self.system_prompt) + 4
-        if self.summary:
-            total_budget += token_counter.count(self.summary) + 4
-        for m in self.history:
-            total_budget += token_counter.count(m.get("content") or "") + 4
-        
-        available_budget = max(0, total_budget - token_counter.count(self.system_prompt) - 4)
+        # Per-component budget allocation. With a real budget we slice from
+        # the context window; without one we fall back to the legacy
+        # content-derived allocation (budget is circular with content, but
+        # preserved for backward compatibility).
+        if budget is not None:
+            available_budget = max(0, budget)
+        else:
+            total_budget = token_counter.count(self.system_prompt) + 4
+            if self.summary:
+                total_budget += token_counter.count(self.summary) + 4
+            for m in self.history:
+                total_budget += token_counter.count(m.get("content") or "") + 4
+            available_budget = max(0, total_budget - token_counter.count(self.system_prompt) - 4)
         
         # Calculate per-component budgets
         system_budget = int(available_budget * settings.budget_system_prompt_pct)
@@ -273,7 +450,11 @@ class Session:
         msgs.extend(rag_msgs)
         msgs.extend(summary_msgs)
         msgs.extend(history_msgs)
-        
+
+        # Hard safety net: with a real budget, guarantee the final list fits.
+        if budget is not None:
+            msgs = _clamp_messages(msgs, budget, token_counter)
+
         return msgs
 
     def get_token_breakdown(self, counter: TokenCounter) -> dict:

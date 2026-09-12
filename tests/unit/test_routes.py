@@ -209,6 +209,123 @@ class TestProxyRouter:
         assert response.status_code == 200
 
 
+class TestProxyRouterEmbeddings:
+    @pytest.fixture
+    def client(self, mock_embedding_service):
+        from types import SimpleNamespace
+        from fastapi import FastAPI
+
+        app = FastAPI()
+        router = build_proxy_router("http://localhost:8081", embedding_service=mock_embedding_service)
+        app.include_router(router)
+
+        async def mock_verify():
+            return "test-key"
+        app.dependency_overrides[verify_api_key] = mock_verify
+
+        return TestClient(app), mock_embedding_service
+
+    def test_single_input(self, client):
+        test_client, emb = client
+        response = test_client.post(
+            "/v1/embeddings",
+            json={"input": "hello world", "model": "mock"},
+            headers={"X-API-Key": "test-key"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["object"] == "list"
+        assert data["model"] == "mock"
+        assert len(data["data"]) == 1
+        item = data["data"][0]
+        assert item["object"] == "embedding"
+        assert item["index"] == 0
+        assert len(item["embedding"]) == 384
+        assert all(isinstance(x, float) for x in item["embedding"])
+        assert set(item["embedding"]) == set(round(x, 6) for x in item["embedding"])
+        assert "usage" in data
+        assert data["usage"]["prompt_tokens"] > 0
+        assert data["usage"]["total_tokens"] == data["usage"]["prompt_tokens"]
+
+    def test_batch_input(self, client):
+        test_client, _ = client
+        response = test_client.post(
+            "/v1/embeddings",
+            json={"input": ["first text", "second text"]},
+            headers={"X-API-Key": "test-key"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data["data"]) == 2
+        assert [item["index"] for item in data["data"]] == [0, 1]
+        assert data["data"][0]["embedding"] != data["data"][1]["embedding"]
+
+    def test_missing_input(self, client):
+        test_client, _ = client
+        response = test_client.post("/v1/embeddings", json={}, headers={"X-API-Key": "test-key"})
+        assert response.status_code == 400
+
+    def test_invalid_input_type(self, client):
+        test_client, _ = client
+        response = test_client.post(
+            "/v1/embeddings", json={"input": 42}, headers={"X-API-Key": "test-key"}
+        )
+        assert response.status_code == 400
+
+    def test_empty_input(self, client):
+        test_client, _ = client
+        response = test_client.post(
+            "/v1/embeddings", json={"input": ""}, headers={"X-API-Key": "test-key"}
+        )
+        assert response.status_code == 200
+        assert len(response.json()["data"]) == 1
+
+    def test_get_embeddings_not_found(self, client):
+        test_client, _ = client
+        response = test_client.get("/v1/embeddings", headers={"X-API-Key": "test-key"})
+        assert response.status_code == 404
+
+    def test_requires_api_key(self, client):
+        test_client, _ = client
+        test_client.app.dependency_overrides.clear()
+        response = test_client.post("/v1/embeddings", json={"input": "hello"})
+        assert response.status_code in (401, 422)
+
+    def test_no_embedding_service_returns_503(self, temp_dir):
+        from fastapi import FastAPI
+        # Rebinding against the proxy router's OWN auth dependency (other
+        # suites reload app.auth/app.config, so a fresh import here can be a
+        # different object than what proxy_router captured).
+        import app.routes.proxy_router as _pr
+
+        app = FastAPI()
+        router = _pr.build_proxy_router("http://localhost:8081", embedding_service=None)
+        app.include_router(router)
+
+        async def mock_verify():
+            return "test-key"
+        app.dependency_overrides[_pr.verify_api_key] = mock_verify
+
+        response = TestClient(app).post(
+            "/v1/embeddings", json={"input": "hello"}, headers={"X-API-Key": "test-key"}
+        )
+        assert response.status_code == 503
+
+    def test_disabled_by_settings_returns_404(self, client, monkeypatch):
+        from types import SimpleNamespace
+        import app.routes.proxy_router as proxy_module
+
+        test_client, _ = client
+        monkeypatch.setattr(
+            proxy_module, "settings",
+            SimpleNamespace(embeddings_enabled=False),
+        )
+        response = test_client.post(
+            "/v1/embeddings", json={"input": "hello"}, headers={"X-API-Key": "test-key"}
+        )
+        assert response.status_code == 404
+
+
 class TestDebugRouter:
     @pytest.fixture
     def app(self, mock_tokenizer, mock_embedding_service, temp_dir, monkeypatch):

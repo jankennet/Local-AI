@@ -152,7 +152,12 @@ Tool results (file reads, command output) are automatically summarized to preser
 | `LLM_BUDGET_RAG_PCT` | 0.15 | % of budget for retrieved context |
 | `LLM_BUDGET_TOOLS_PCT` | 0.10 | % of budget for tool results |
 
-Each component gets a guaranteed slice of the token budget. History is trimmed from oldest; RAG/tool results are compressed; summary is truncated if needed.
+Each component gets a guaranteed slice of the token budget — derived from
+the actual model context window (`n_ctx`), not the current message sizes.
+History is trimmed from oldest; RAG/tool results are compressed; summary is
+truncated if needed. A final hard clamp guarantees the assembled request can
+never exceed the context window, even for single-message conversations
+(system prompt included).
 
 **CPU-friendly reranker options** (no AVX2 needed):
 - `cross-encoder/ms-marco-MiniLM-L-6-v2` (22M, fast, default)
@@ -217,7 +222,9 @@ Format: `n_ctx / n_batch`. Failed configs fall back automatically. The `n_ctx` t
 ## Tool Calling (ReAct Agent)
 
 Managed sessions (`/sessions/{id}/chat`) include a ReAct agent loop with
-built-in tools (`read_file`, `write_file`, `list_dir`, `run_bash`).
+built-in tools (`read_file`, `write_file`, `list_dir`, `run_bash`,
+`web_search`). Research and General agents can also search the web for
+current or external information.
 
 Reliability improvements:
 - **Parallel tool calls** — multiple tool invocations in one round execute concurrently
@@ -233,6 +240,38 @@ Environment variables:
 | `LLM_TOOL_MAX_RETRIES` | 2 | Retry attempts for failed tools |
 | `LLM_ALLOW_SHELL` | 0 | Set to `1` to enable `run_bash` tool |
 | `LLM_WORKSPACE_DIR` | `workspace` | Root directory for file tools |
+| `LLM_WEB_SEARCH_ENABLED` | true | Set to `false` to disable the `web_search` tool |
+| `LLM_WEB_SEARCH_TIMEOUT` | 15.0 | Max seconds for a web search round trip |
+
+`web_search` uses DuckDuckGo's HTML endpoint (no API key needed), keeps a
+small in-process result cache (5-minute TTL), and is available to the
+Research and General agents. Like `run_bash`, it can be kill-switched
+server-side — the model never reaches the network when disabled.
+
+---
+
+## OpenAI-Compatible Embeddings
+
+`POST /v1/embeddings` is served **in-process** from the local
+sentence-transformers model — llama-server can't produce embeddings (it
+loads a chat GGUF), so this endpoint is never proxied. Continue's
+`@codebase` can point here instead of downloading its own model:
+
+```bash
+curl -s http://127.0.0.1:8000/v1/embeddings \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: <your LLM_API_KEY value>" \
+  -d '{"input": "hello world", "model": "sentence-transformers/all-MiniLM-L6-v2"}'
+```
+
+Returns the OpenAI shape: `data[].embedding` (384-dim float vectors, 6-decimal
+precision), `model`, and `usage`. `encoding_format` supports `float`
+(default) and `base64`. Requests/batches run on a worker thread so the
+event loop isn't blocked.
+
+| Variable | Default | Description |
+|---|---|---|
+| `LLM_EMBEDDINGS_ENABLED` | true | Set to `false` to return 404 (escape hatch) |
 
 ---
 

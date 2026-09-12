@@ -172,7 +172,7 @@ def create_app() -> FastAPI:
         tool_timeout_seconds=settings.tool_timeout_seconds,
         tool_max_retries=settings.tool_max_retries,
     ))
-    app.include_router(build_proxy_router(base_url))
+    app.include_router(build_proxy_router(base_url, embedding_service=embedding_service))
     app.include_router(build_debug_router(
         store, embedding_service,
         settings.vector_backend, settings.vector_db_path, settings.vector_collection,

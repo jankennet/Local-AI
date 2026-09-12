@@ -79,6 +79,11 @@ class Settings:
     qdrant_server_url: str = ""                 # e.g. "http://localhost:6333"
     # Session limits
     max_sessions_per_user: int = 50             # Max sessions per user (enforced server-side)
+    # Web search tool
+    web_search_enabled: bool = True             # Kill switch for the web_search tool
+    web_search_timeout: float = 15.0            # Max seconds for a search round trip
+    # /v1/embeddings endpoint
+    embeddings_enabled: bool = True             # Serve OpenAI-compatible embeddings (kill switch)
 
 
 def load_settings() -> Settings:
@@ -134,6 +139,9 @@ def load_settings() -> Settings:
         orchestrator_force_agent=os.environ.get("LLM_ORCHESTRATOR_FORCE_AGENT", ""),
         qdrant_server_url=os.environ.get("LLM_QDRANT_SERVER_URL", ""),
         max_sessions_per_user=int(os.environ.get("LLM_MAX_SESSIONS_PER_USER", "50")),
+        web_search_enabled=os.environ.get("LLM_WEB_SEARCH_ENABLED", "true").lower() == "true",
+        web_search_timeout=float(os.environ.get("LLM_WEB_SEARCH_TIMEOUT", "15")),
+        embeddings_enabled=os.environ.get("LLM_EMBEDDINGS_ENABLED", "true").lower() == "true",
     )
 
     budget_sum = (
