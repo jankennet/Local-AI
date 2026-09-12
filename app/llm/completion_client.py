@@ -27,6 +27,21 @@ import httpx
 from ..metrics import record_completion
 
 
+def _normalize_tool_calls(message: dict) -> dict:
+    tool_calls = message.get("tool_calls")
+    if not tool_calls:
+        return message
+    normalized = dict(message)
+    normalized["tool_calls"] = [
+        {**tc, "type": (tc.get("type") or "function")} for tc in tool_calls
+    ]
+    return normalized
+
+
+def _normalize_messages(messages: list) -> list:
+    return [_normalize_tool_calls(m) if isinstance(m, dict) else m for m in messages]
+
+
 class CompletionClient(Protocol):
     async def complete(self, messages: list, max_tokens: int, temperature: float) -> str: ...
 
@@ -61,7 +76,7 @@ class LoopbackCompletionClient:
     async def _post_async(
         self, messages: list, tools: Optional[list], max_tokens: int, temperature: float
     ) -> dict:
-        payload = {"messages": messages, "max_tokens": max_tokens, "temperature": temperature}
+        payload = {"messages": _normalize_messages(messages), "max_tokens": max_tokens, "temperature": temperature}
         if tools:
             payload["tools"] = tools
         start = time.time()
@@ -88,7 +103,7 @@ class LoopbackCompletionClient:
     ) -> AsyncGenerator[str, None]:
         """Stream completion tokens as they arrive."""
         payload = {
-            "messages": messages,
+            "messages": _normalize_messages(messages),
             "max_tokens": max_tokens,
             "temperature": temperature,
             "stream": True,
@@ -127,7 +142,7 @@ class LoopbackCompletionClient:
     ) -> AsyncGenerator[dict, None]:
         """Stream completion with tool calls as they arrive."""
         payload = {
-            "messages": messages,
+            "messages": _normalize_messages(messages),
             "max_tokens": max_tokens,
             "temperature": temperature,
             "tools": tools,
@@ -161,7 +176,9 @@ class LoopbackCompletionClient:
                                 for tc in tool_calls:
                                     index = tc.get("index", 0)
                                     while len(tool_calls_buffer) <= index:
-                                        tool_calls_buffer.append({"id": "", "function": {"name": "", "arguments": ""}})
+                                        tool_calls_buffer.append({"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
+                                    if tc.get("type"):
+                                        tool_calls_buffer[index]["type"] = tc["type"]
                                     if tc.get("id"):
                                         tool_calls_buffer[index]["id"] = tc["id"]
                                     if tc.get("function", {}).get("name"):

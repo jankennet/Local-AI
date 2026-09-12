@@ -2,6 +2,7 @@
 Unit tests for LLM components (catalog.py, gpu_detect.py, server_launcher.py, tools.py, agent_loop.py)
 """
 
+import json
 import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch, AsyncMock
@@ -26,6 +27,11 @@ from app.llm.agent_loop import (
     MAX_TOOL_ROUNDS,
 )
 from app.llm.server_launcher import PERFORMANCE_TIERS, get_adaptive_configs
+from app.llm.completion_client import (
+    LoopbackCompletionClient,
+    _normalize_messages,
+    _normalize_tool_calls,
+)
 
 
 class TestCatalog:
@@ -317,3 +323,332 @@ class TestAgentLoopIntegration:
         
         assert reply == "Hello! How can I help?"
         assert mock_client.complete_with_tools.call_count == 1
+
+
+class TestCompletionClientToolCallNormalization:
+    def test_normalize_tool_calls_adds_missing_type(self):
+        msg = {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"id": "x", "function": {"name": "web_search", "arguments": "{}"}}
+            ],
+        }
+        out = _normalize_tool_calls(msg)
+        assert out["tool_calls"][0]["type"] == "function"
+        assert out["tool_calls"][0]["id"] == "x"
+        assert out is not msg
+
+    def test_normalize_tool_calls_preserves_existing_type(self):
+        msg = {
+            "role": "assistant",
+            "tool_calls": [
+                {"id": "x", "type": "function", "function": {"name": "web_search", "arguments": "{}"}}
+            ],
+        }
+        assert _normalize_tool_calls(msg)["tool_calls"][0]["type"] == "function"
+
+    def test_normalize_tool_calls_ignores_plain_message(self):
+        msg = {"role": "user", "content": "hi"}
+        assert _normalize_tool_calls(msg) == msg
+
+    def test_normalize_messages_leaves_non_dicts_alone(self):
+        assert _normalize_messages([{"role": "user", "content": "hi"}, "raw"]) == [
+            {"role": "user", "content": "hi"},
+            "raw",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_complete_with_tools_stream_emits_type_and_normalizes_payload(self):
+        client = LoopbackCompletionClient("http://localhost:8081")
+        client._client = MagicMock()
+
+        stale_history = [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "old_1",
+                        "function": {"name": "web_search", "arguments": '{"query": "Edo"}'},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "old_1", "content": "results"},
+        ]
+
+        lines = [
+            "data: " + json.dumps({"choices": [{"delta": {"role": "assistant", "tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": "web_search", "arguments": ""}}]}}]}),
+            "data: " + json.dumps({"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": '{"query": "Volta"}'}}]}}]}),
+            "data: " + json.dumps({"choices": [{"delta": {}, "finish_reason": "tool_calls"}], "usage": {"prompt_tokens": 10, "completion_tokens": 5}}),
+            "data: [DONE]",
+        ]
+
+        class FakeResp:
+            def raise_for_status(self):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def aiter_lines(self):
+                for line in lines:
+                    yield line
+
+        client._client.stream.return_value = FakeResp()
+
+        events = []
+        async for event in client.complete_with_tools_stream(
+            stale_history,
+            [{"type": "function", "function": {"name": "web_search"}}],
+            32,
+            0.7,
+        ):
+            events.append(event)
+
+        finish = events[-1]
+        assert finish["type"] == "finish"
+        tc = finish["tool_calls"][0]
+        assert tc["type"] == "function"
+        assert tc["id"] == "call_1"
+        assert tc["function"]["name"] == "web_search"
+        assert "Volta" in tc["function"]["arguments"]
+
+        _, kwargs = client._client.stream.call_args
+        payload = kwargs["json"]
+        assert payload["messages"][0]["tool_calls"][0]["type"] == "function"
+
+
+class TestDeadRoundGuard:
+    def test_is_dead_tool_result(self):
+        from app.llm.agents.base import _is_dead_tool_result
+        assert _is_dead_tool_result(
+            "Error: web search is temporarily unavailable (all providers blocked or unreachable)"
+        ) is True
+        assert _is_dead_tool_result("Search for 'x': no results found.") is True
+        assert _is_dead_tool_result("error running command: boom") is True
+        assert _is_dead_tool_result(
+            "Search results for: cats\n1. Cats Are Great\n   URL: example.com/cats"
+        ) is False
+        assert _is_dead_tool_result("") is False
+
+    def test_is_dead_round(self):
+        from app.llm.agents.base import _is_dead_round
+        assert _is_dead_round([]) is False
+        assert _is_dead_round(["Error: a", "Error: b"]) is True
+        assert _is_dead_round(["real content"]) is False
+        assert _is_dead_round(["Error: a", "real content"]) is False
+
+
+class TestFileToolsGuardrail:
+    def test_file_tools_note_empty_when_file_tools_available(self):
+        from app.llm.agents.base import _file_tools_note
+        assert _file_tools_note({"read_file": {}, "web_search": {}}) == ""
+        assert _file_tools_note({"run_bash": {}}) == ""
+        assert _file_tools_note({"list_dir": {}}) == ""
+        assert _file_tools_note({"write_file": {}}) == ""
+
+    def test_file_tools_note_added_when_only_web_search(self):
+        from app.llm.agents.base import _file_tools_note
+        note = _file_tools_note({"web_search": {}})
+        assert "not available" in note
+        assert "read_file" in note
+        assert "analyze it directly" in note
+
+    def test_file_tools_note_added_when_no_tools(self):
+        from app.llm.agents.base import _file_tools_note
+        assert _file_tools_note({}) != ""
+
+    def test_build_messages_appends_guardrail_without_file_tools(self, mock_tokenizer, mock_embedding_service, temp_dir):
+        from app.sessions.store import SessionStore
+        from app.sessions.repository import JSONSessionRepository
+        from app.sessions.eviction import SummarizeOldestStrategy
+        from app.llm.agents.base import AgentContext
+        from app.llm.agents.reviewer import ReviewerAgent
+
+        repo = JSONSessionRepository(str(temp_dir / "sessions.json"))
+        store = SessionStore(
+            counter=mock_tokenizer,
+            repository=repo,
+            eviction=SummarizeOldestStrategy(),
+            n_ctx=4096,
+            embedding_service=mock_embedding_service,
+        )
+        session = store.create_session("device-1")
+        store.add_turn(session.session_id, "user", "verify this code")
+
+        context = AgentContext(
+            session_id=session.session_id,
+            query="verify this code",
+            store=store,
+            completion_client=object(),
+            tools={"web_search": {}},
+        )
+        agent = ReviewerAgent()
+        messages = agent._build_messages_with_system(context)
+        assert messages[0]["role"] == "system"
+        assert "not available in this session" in messages[0]["content"]
+        assert "analyze it directly" in messages[0]["content"]
+
+    def test_build_messages_no_guardrail_when_file_tools_available(self, mock_tokenizer, mock_embedding_service, temp_dir):
+        from app.sessions.store import SessionStore
+        from app.sessions.repository import JSONSessionRepository
+        from app.sessions.eviction import SummarizeOldestStrategy
+        from app.llm.agents.base import AgentContext
+        from app.llm.agents.reviewer import ReviewerAgent
+
+        repo = JSONSessionRepository(str(temp_dir / "sessions.json"))
+        store = SessionStore(
+            counter=mock_tokenizer,
+            repository=repo,
+            eviction=SummarizeOldestStrategy(),
+            n_ctx=4096,
+            embedding_service=mock_embedding_service,
+        )
+        session = store.create_session("device-1")
+        store.add_turn(session.session_id, "user", "verify this code")
+
+        context = AgentContext(
+            session_id=session.session_id,
+            query="verify this code",
+            store=store,
+            completion_client=object(),
+            tools={"read_file": {}, "list_dir": {}, "web_search": {}},
+        )
+        agent = ReviewerAgent()
+        messages = agent._build_messages_with_system(context)
+        assert messages[0]["role"] == "system"
+        assert "not available in this session" not in messages[0]["content"]
+
+    def _dead_agent_setup(self, mock_tokenizer, mock_embedding_service, temp_dir):
+        from app.sessions.store import SessionStore
+        from app.sessions.repository import JSONSessionRepository
+        from app.sessions.eviction import SummarizeOldestStrategy
+        from app.llm.agents.base import AgentContext
+        from app.llm.agents.researcher import ResearcherAgent
+
+        repo = JSONSessionRepository(str(temp_dir / "sessions.json"))
+        store = SessionStore(
+            counter=mock_tokenizer,
+            repository=repo,
+            eviction=SummarizeOldestStrategy(),
+            n_ctx=4096,
+            embedding_service=mock_embedding_service,
+        )
+        session = store.create_session("device-1")
+        store.add_turn(session.session_id, "user", "Who wrote Solo Leveling?")
+
+        async def dead_search(**kwargs):
+            return "Error: web search is temporarily unavailable (all providers blocked or unreachable)"
+
+        tools = {
+            "web_search": {
+                "fn": dead_search,
+                "schema": {
+                    "type": "function",
+                    "function": {
+                        "name": "web_search",
+                        "parameters": {
+                            "properties": {
+                                "query": {"type": "string"},
+                                "num_results": {"type": "integer"},
+                            },
+                            "required": ["query"],
+                        },
+                    },
+                },
+            }
+        }
+        context = AgentContext(
+            session_id=session.session_id,
+            query="Who wrote Solo Leveling?",
+            store=store,
+            completion_client=object(),
+            tools=tools,
+            max_tokens=64,
+            max_retries=0,
+            token_budget=4096,
+            max_rounds=8,
+            max_tool_calls=20,
+        )
+        return store, session, context, tools
+
+    @pytest.mark.asyncio
+    async def test_non_stream_loop_stops_after_two_dead_rounds(self, mock_tokenizer, mock_embedding_service, temp_dir):
+        from app.llm.agents.base import DEAD_ROUND_REPLY
+        from app.llm.agents.researcher import ResearcherAgent
+
+        store, session, context, tools = self._dead_agent_setup(
+            mock_tokenizer, mock_embedding_service, temp_dir
+        )
+
+        payload = {
+            "content": "I'll search.",
+            "tool_calls": [
+                {"id": "tc-1", "type": "function", "function": {"name": "web_search", "arguments": '{"query": "X"}'}}
+            ],
+        }
+
+        class ToolLoopClient:
+            def __init__(self):
+                self.calls = 0
+
+            async def complete_with_tools(self, messages, tool_schemas, max_tokens, temperature=0.7, stop=None):
+                self.calls += 1
+                return payload
+
+        client = ToolLoopClient()
+        context.completion_client = client
+        schema = tools["web_search"]["schema"]
+
+        agent = ResearcherAgent()
+        reply, rounds_used, tool_calls_made = await agent._run_tool_loop(
+            context, store.build_messages(session.session_id), [schema], max_rounds=8
+        )
+
+        assert reply == DEAD_ROUND_REPLY
+        assert rounds_used == 2
+        assert tool_calls_made == 2
+        assert client.calls == 2
+        assert store.get(session.session_id).history[-1]["role"] == "assistant"
+        assert store.get(session.session_id).history[-1]["content"] == DEAD_ROUND_REPLY
+
+    @pytest.mark.asyncio
+    async def test_stream_loop_stops_after_two_dead_rounds(self, mock_tokenizer, mock_embedding_service, temp_dir):
+        from app.llm.agents.base import DEAD_ROUND_REPLY
+        from app.llm.agents.researcher import ResearcherAgent
+
+        store, session, context, tools = self._dead_agent_setup(
+            mock_tokenizer, mock_embedding_service, temp_dir
+        )
+
+        class StreamToolLoopClient:
+            def __init__(self):
+                self.calls = 0
+
+            async def complete_with_tools_stream(self, messages, tool_schemas, max_tokens, temperature=0.7, stop=None):
+                self.calls += 1
+                tc = {"id": "tc-1", "type": "function", "function": {"name": "web_search", "arguments": '{"query": "X"}'}}
+                yield {"type": "tool_calls", "tool_calls": [dict(tc)]}
+                yield {"type": "finish", "finish_reason": "tool_calls", "content": "", "tool_calls": [dict(tc)]}
+
+        client = StreamToolLoopClient()
+        context.completion_client = client
+        schema = tools["web_search"]["schema"]
+
+        agent = ResearcherAgent()
+        events = []
+        async for event in agent._run_tool_loop_stream(
+            context, store.build_messages(session.session_id), [schema], max_rounds=8
+        ):
+            events.append(event)
+
+        assert client.calls == 2
+        assert events[-1]["type"] == "done"
+        assert events[-1]["reply"] == DEAD_ROUND_REPLY
+        assert events[-2]["type"] == "content_delta"
+        assert events[-2]["content"] == DEAD_ROUND_REPLY
+        assert store.get(session.session_id).history[-1]["role"] == "assistant"

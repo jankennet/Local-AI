@@ -20,6 +20,29 @@ class ClassificationResult:
     requires_planning: bool = False
 
 
+# Code-specific tokens that are essentially never used in ordinary prose.
+# Used to detect code pasted inline in a message (as opposed to prose that
+# merely mentions code words like "class" or "function").
+_INLINE_CODE_TOKENS = [
+    "const ", "let ", "var ", "function ", "=>", "import ", "require(",
+    "require (", "def ", "class ", "return ", "await ", "async ", "print(",
+    "console.log", ";", " = ", "new ",
+]
+
+
+def _contains_inline_code(text: str) -> bool:
+    """True when the message looks like it contains pasted code.
+
+    A backtick (inline or fenced code block) is conclusive. Otherwise require
+    at least two code-token hits, so a single prose mention of "class" or
+    "function" does not false-positive.
+    """
+    if "`" in text:
+        return True
+    t = text.lower()
+    return sum(1 for tok in _INLINE_CODE_TOKENS if tok in t) >= 2
+
+
 class QueryClassifier:
     """Classifies queries to determine the best agent for the task."""
 
@@ -53,6 +76,17 @@ class QueryClassifier:
         r"\b(learn|understand|study)\b.*\b(concept|topic|subject|language|framework|technology)\b",
     ]
 
+    # Factual lookups that need verification (people, roles, current
+    # information). Scored lower than RESEARCHER_PATTERNS so a "who is X"
+    # routes to the Researcher (web_search available) without inflating the
+    # score past the planning threshold.
+    FACT_PATTERNS = [
+        r"\b(who is|who'?s|whom is)\b",
+        r"\b(ceo|president|chairman|chairwoman|founder|owner|director|leader|minister|governor|mayor)\b[^\n]{0,40}\bof\b",
+        r"\b(current|new|latest|recent)\s+(ceo|president|chairman|leader|head)\b",
+        r"\b(wikipedia|linkedin)\b",
+    ]
+
     PLANNER_PATTERNS = [
         r"\b(plan|planning|roadmap|steps|break down|decompose)\b",
         r"\b(project|feature|system|architecture|design)\b",
@@ -74,6 +108,7 @@ class QueryClassifier:
             AgentType.PLANNER: [re.compile(p, re.IGNORECASE) for p in self.PLANNER_PATTERNS],
             AgentType.REVIEWER: [re.compile(p, re.IGNORECASE) for p in self.REVIEWER_PATTERNS],
         }
+        self._fact_patterns = [re.compile(p, re.IGNORECASE) for p in self.FACT_PATTERNS]
 
     def classify(self, query: str, session_context: Optional[str] = None) -> ClassificationResult:
         """Classify a query and return the best agent type."""
@@ -86,6 +121,13 @@ class QueryClassifier:
                 if pattern.search(query):
                     scores[agent_type] += 1.0
                     matches[agent_type].append(pattern.pattern)
+
+        # Factual-lookup signals (people, roles, current info) go to RESEARCHER,
+        # which has the web_search tool and must verify rather than hallucinate.
+        for pattern in self._fact_patterns:
+            if pattern.search(query):
+                scores[AgentType.RESEARCHER] += 0.6
+                matches[AgentType.RESEARCHER].append(pattern.pattern)
 
         # Boost for explicit agent mentions
         query_lower = query.lower()
@@ -125,18 +167,36 @@ class QueryClassifier:
 
         # Explanatory how-to / deep-dive requests stay with GENERAL even when
         # they trip PLANNER keywords like "steps"; the General agent answers
-        # with the concise generalized summary (and notes a full deep-dive
-        # isn't possible). Genuine project planning keeps going to PLANNER.
+        # with the concise general summary (and notes a full deep-dive isn't
+        # possible). Genuine project planning keeps going to PLANNER.
+        #
+        # Code agents (reader/writer/researcher) also yield to GENERAL for
+        # explanatory requests when the code is pasted INLINE in the message:
+        # file-access adds nothing (the answer comes from the snippet), and
+        # GENERAL's HARD OUTPUT RULE is the only reliable poor-man's concise
+        # enforcement for this model (code-agent prompt rules alone are
+        # ignored). Queries that merely reference code in the workspace keep
+        # their code-agent routing.
         EXPLAIN_MARKERS = ["explain", "deep dive", "full detail", "detailed explanation", "help me with", "walk me through", "guide me through"]
         PLAN_MARKERS = ["plan", "build", "design", "architect", "architecture", "roadmap", "project", "feature", "system design", "decompose", "break down"]
 
         def _has_whole_word(markers, text):
             return any(re.search(rf"\b{re.escape(m)}\b", text) for m in markers)
 
-        if (
-            best_agent == AgentType.PLANNER
-            and _has_whole_word(EXPLAIN_MARKERS, query_lower)
+        is_explanatory = (
+            _has_whole_word(EXPLAIN_MARKERS, query_lower)
             and not _has_whole_word(PLAN_MARKERS, query_lower)
+        )
+
+        if (
+            is_explanatory
+            and (
+                best_agent == AgentType.PLANNER
+                or (
+                    best_agent in (AgentType.CODE_READER, AgentType.CODE_WRITER, AgentType.RESEARCHER)
+                    and _contains_inline_code(query)
+                )
+            )
         ):
             best_agent = AgentType.GENERAL
             best_score = scores[AgentType.GENERAL]
@@ -150,11 +210,15 @@ class QueryClassifier:
                 reasoning="No strong domain signals detected; using general agent",
             )
 
-        # Check if planning is needed (complex task)
+        # Check if planning is needed (complex task). Explanatory how-to
+        # requests never get auto-planning: an "explain this code" question
+        # with inline code trips the word-count heuristic, and injecting a
+        # Planner artifact overrides the concise-answer guardrail (see MEMORY.md).
         requires_planning = (
             best_agent in (AgentType.CODE_READER, AgentType.CODE_WRITER, AgentType.RESEARCHER)
             and best_score > 1.5
             and any(len(q.split()) > 15 for q in [query])
+            and not is_explanatory
         )
 
         confidence = min(0.9, 0.5 + best_score * 0.15)

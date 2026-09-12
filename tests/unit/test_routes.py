@@ -148,6 +148,249 @@ class TestSessionsRouter:
         
         assert response.status_code == 404
 
+    def test_lean_chat_still_gets_web_search_tool(self, mock_tokenizer, mock_embedding_service, temp_dir, monkeypatch):
+        """Casual chat must keep the web_search tool so the model can verify facts."""
+        from app.sessions.store import SessionStore
+        from app.sessions.repository import JSONSessionRepository
+        from app.sessions.eviction import SummarizeOldestStrategy
+        from app.llm.completion_client import CompletionClient
+        from app.routes import sessions_router as sr_module
+
+        captured = {}
+
+        async def recording_complete_with_tools(messages, tool_schemas, max_tokens, temperature):
+            captured["schemas"] = tool_schemas
+            return {"content": "Test response", "tool_calls": None, "finish_reason": None}
+
+        mock_client = MagicMock(spec=CompletionClient)
+        mock_client.complete_with_tools = recording_complete_with_tools
+
+        repo = JSONSessionRepository(str(temp_dir / "sessions.json"))
+        store = SessionStore(
+            counter=mock_tokenizer,
+            repository=repo,
+            eviction=SummarizeOldestStrategy(),
+            n_ctx=4096,
+            embedding_service=mock_embedding_service,
+        )
+
+        tools = {"web_search": {"fn": lambda: None, "schema": {"type": "function", "function": {"name": "web_search"}}}}
+
+        app = FastAPI()
+        router = build_sessions_router(
+            store=store,
+            completion_client=mock_client,
+            tools=tools,
+            tool_timeout_seconds=30.0,
+            tool_max_retries=2,
+        )
+        app.include_router(router)
+
+        async def mock_verify():
+            return "test-key"
+        app.dependency_overrides[verify_api_key] = mock_verify
+
+        # Force the casual/lean path (General agent, web_search only).
+        monkeypatch.setattr(sr_module, "_is_casual_chat", lambda *a, **k: True)
+
+        test_client = TestClient(app)
+        create_resp = test_client.post(
+            "/sessions", json={"device_name": "device-1"}, headers={"X-API-Key": "test-key"}
+        )
+        session_id = create_resp.json()["session_id"]
+
+        response = test_client.post(
+            f"/sessions/{session_id}/chat",
+            json={"message": "who is the CEO of Itel?", "use_rag": False},
+            headers={"X-API-Key": "test-key"},
+        )
+
+        assert response.status_code == 200
+        schemas = captured.get("schemas")
+        assert schemas is not None
+        assert any(s["function"]["name"] == "web_search" for s in schemas)
+        assert not any(s["function"]["name"] == "read_file" for s in schemas)
+
+    def test_non_rag_code_query_gets_no_file_tools(self, mock_tokenizer, mock_embedding_service, temp_dir, monkeypatch):
+        """Code/review queries from a non-RAG client (Discord, use_rag=False)
+        must NOT expose file/shell tools to the model — the same query that
+        previously made the Reviewer attempt read_file/run_bash."""
+        from app.sessions.store import SessionStore
+        from app.sessions.repository import JSONSessionRepository
+        from app.sessions.eviction import SummarizeOldestStrategy
+        from app.llm.completion_client import CompletionClient
+        from app.routes import sessions_router as sr_module
+
+        captured = {}
+
+        async def recording_complete_with_tools(messages, tool_schemas, max_tokens, temperature):
+            captured["schemas"] = tool_schemas
+            return {"content": "Test response", "tool_calls": None, "finish_reason": None}
+
+        mock_client = MagicMock(spec=CompletionClient)
+        mock_client.complete_with_tools = recording_complete_with_tools
+
+        repo = JSONSessionRepository(str(temp_dir / "sessions.json"))
+        store = SessionStore(
+            counter=mock_tokenizer,
+            repository=repo,
+            eviction=SummarizeOldestStrategy(),
+            n_ctx=4096,
+            embedding_service=mock_embedding_service,
+        )
+
+        def tool(name):
+            return {"fn": lambda: None, "schema": {"type": "function", "function": {"name": name}}}
+
+        tools = {
+            "web_search": tool("web_search"),
+            "read_file": tool("read_file"),
+            "write_file": tool("write_file"),
+            "list_dir": tool("list_dir"),
+            "run_bash": tool("run_bash"),
+        }
+
+        app = FastAPI()
+        router = build_sessions_router(
+            store=store,
+            completion_client=mock_client,
+            tools=tools,
+            tool_timeout_seconds=30.0,
+            tool_max_retries=2,
+        )
+        app.include_router(router)
+
+        async def mock_verify():
+            return "test-key"
+        app.dependency_overrides[verify_api_key] = mock_verify
+
+        # Force the non-lean (agentic) route: code query, not casual chat.
+        monkeypatch.setattr(sr_module, "_is_casual_chat", lambda *a, **k: False)
+
+        test_client = TestClient(app)
+        create_resp = test_client.post(
+            "/sessions", json={"device_name": "discord"}, headers={"X-API-Key": "test-key"}
+        )
+        session_id = create_resp.json()["session_id"]
+
+        response = test_client.post(
+            f"/sessions/{session_id}/chat",
+            json={"message": "could you verify if this implementation is correct?", "use_rag": False},
+            headers={"X-API-Key": "test-key"},
+        )
+
+        assert response.status_code == 200
+        schemas = captured.get("schemas") or []
+        names = {s["function"]["name"] for s in schemas}
+        assert not (names & {"read_file", "write_file", "list_dir", "run_bash"})
+
+    def test_inline_code_explain_does_not_invoke_planner(self, mock_tokenizer, mock_embedding_service, temp_dir, monkeypatch):
+        """'explain this code' queries must run the primary agent alone — no
+        Planner artifact injection (which previously overrode the concise
+        reply guardrail with a verbatim step-plan)."""
+        from app.sessions.store import SessionStore
+        from app.sessions.repository import JSONSessionRepository
+        from app.sessions.eviction import SummarizeOldestStrategy
+        from app.llm.completion_client import CompletionClient
+        from app.routes import sessions_router as sr_module
+
+        calls = {"count": 0}
+
+        async def recording_complete_with_tools(messages, tool_schemas, max_tokens, temperature):
+            calls["count"] += 1
+            return {"content": "Test response", "tool_calls": None, "finish_reason": None}
+
+        mock_client = MagicMock(spec=CompletionClient)
+        mock_client.complete_with_tools = recording_complete_with_tools
+
+        repo = JSONSessionRepository(str(temp_dir / "sessions.json"))
+        store = SessionStore(
+            counter=mock_tokenizer,
+            repository=repo,
+            eviction=SummarizeOldestStrategy(),
+            n_ctx=4096,
+            embedding_service=mock_embedding_service,
+        )
+
+        tools = {"web_search": {"fn": lambda: None, "schema": {"type": "function", "function": {"name": "web_search"}}}}
+
+        app = FastAPI()
+        router = build_sessions_router(
+            store=store,
+            completion_client=mock_client,
+            tools=tools,
+            tool_timeout_seconds=30.0,
+            tool_max_retries=2,
+        )
+        app.include_router(router)
+
+        async def mock_verify():
+            return "test-key"
+        app.dependency_overrides[verify_api_key] = mock_verify
+
+        monkeypatch.setattr(sr_module, "_is_casual_chat", lambda *a, **k: False)
+
+        test_client = TestClient(app)
+        create_resp = test_client.post(
+            "/sessions", json={"device_name": "discord"}, headers={"X-API-Key": "test-key"}
+        )
+        session_id = create_resp.json()["session_id"]
+
+        response = test_client.post(
+            f"/sessions/{session_id}/chat",
+            json={
+                "message": 'count = 1 while count <= 5: print(f"The current count is: {count}") count += 1 print("Loop finished!") explain this code please',
+                "use_rag": False,
+            },
+            headers={"X-API-Key": "test-key"},
+        )
+
+        assert response.status_code == 200
+        assert calls["count"] == 1
+
+
+class TestChatTools:
+    def test_lean_chat_returns_web_search_only(self, monkeypatch):
+        from types import SimpleNamespace
+        import app.routes.sessions_router as sr_module
+
+        monkeypatch.setattr(sr_module, "settings", SimpleNamespace(web_search_enabled=True))
+        tools = {"web_search": {"fn": "ws"}, "read_file": {"fn": "rf"}}
+        out = sr_module._chat_tools(True, tools)
+        assert out == {"web_search": tools["web_search"]}
+
+    def test_non_lean_rag_returns_full_tools(self, monkeypatch):
+        from types import SimpleNamespace
+        import app.routes.sessions_router as sr_module
+
+        monkeypatch.setattr(sr_module, "settings", SimpleNamespace(web_search_enabled=True))
+        tools = {"web_search": {"fn": "ws"}, "read_file": {"fn": "rf"}}
+        assert sr_module._chat_tools(False, tools, use_rag=True) == tools
+
+    def test_non_rag_returns_web_search_only(self, monkeypatch):
+        """Non-agentic clients (use_rag=False, e.g. Discord) never get
+        file/shell tools even for code queries — web_search stays available."""
+        from types import SimpleNamespace
+        import app.routes.sessions_router as sr_module
+
+        monkeypatch.setattr(sr_module, "settings", SimpleNamespace(web_search_enabled=True))
+        tools = {
+            "web_search": {"fn": "ws"},
+            "read_file": {"fn": "rf"},
+            "write_file": {"fn": "wf"},
+            "list_dir": {"fn": "ld"},
+            "run_bash": {"fn": "rb"},
+        }
+        out = sr_module._chat_tools(False, tools, use_rag=False)
+        assert out == {"web_search": tools["web_search"]}
+
+    def test_disabled_returns_empty(self, monkeypatch):
+        from types import SimpleNamespace
+        import app.routes.sessions_router as sr_module
+
+        monkeypatch.setattr(sr_module, "settings", SimpleNamespace(web_search_enabled=False))
+        assert sr_module._chat_tools(True, {"web_search": {"fn": "ws"}}) == {}
+
 
 class TestProxyRouter:
     @pytest.fixture

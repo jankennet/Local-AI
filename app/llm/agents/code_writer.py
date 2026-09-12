@@ -25,6 +25,13 @@ Guidelines:
 - Run tests/linters after changes when possible
 - Explain what you changed and why
 
+CONCISE OUTPUT RULE:
+- When asked to explain or review code that is already in the message, answer
+  directly and concisely — a short paragraph or a few bullets. No "Plan:",
+  "Step N:", or "[Agent type: …]" artifacts, and no step-by-step narrative.
+- If file tools are unavailable, reason from the code in the conversation;
+  do not pretend to read/write files or narrate command access.
+
 When given a code writing task:
 1. Explore the codebase to understand context (read_file, list_dir)
 2. Create a clear plan if the task is complex

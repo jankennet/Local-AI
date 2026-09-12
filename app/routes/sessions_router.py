@@ -39,9 +39,10 @@ def _is_casual_chat(
 ) -> bool:
     """True when the message is plain conversation (no code/research/plan intent).
 
-    Casual chat runs through the lean General agent: no tools, no RAG.
-    Mirrors the orchestrator's session-context boost so both make the same
-    routing decision.
+    Casual chat runs through the lean General agent: no RAG, and only
+    `web_search` from the toolset (it must still be able to look up facts it
+    doesn't know). Mirrors the orchestrator's session-context boost so both
+    make the same routing decision.
     """
     from ..llm.agents.classifier import get_classifier
 
@@ -52,6 +53,25 @@ def _is_casual_chat(
         for turn in recent
     )
     return get_classifier().classify(message, session_context).agent_type == AgentType.GENERAL
+
+
+def _chat_tools(lean_chat: bool, tools: dict, use_rag: bool = False) -> dict:
+    """Tools available for a chat turn.
+
+    Lean casual chat AND non-agentic clients (use_rag=False — think Discord)
+    only get `web_search`, so the assistant can look up facts instead of
+    hallucinating without ever touching the server's files or shell. File and
+    shell tools (`read_file`, `write_file`, `list_dir`, `run_bash`) are only
+    exposed to agentic RAG clients (use_rag=True — think VS Code), where the
+    per-agent `allowed_tools` filter keeps them scoped. Kill-switched via
+    LLM_WEB_SEARCH_ENABLED=false.
+    """
+    if not settings.web_search_enabled:
+        return {}
+    ws = tools.get("web_search")
+    if lean_chat or not use_rag:
+        return {"web_search": ws} if ws else {}
+    return tools
 
 
 def build_sessions_router(
@@ -162,12 +182,13 @@ def build_sessions_router(
 
                 from ..llm.agents import AgentContext
                 # Lean chat profile: plain conversational queries go to the
-                # General agent without tools or RAG. Code/research/plan
-                # queries keep the full context.
+                # General agent without RAG. Code/research/plan queries keep
+                # the full context. `web_search` stays available either way so
+                # the model can verify facts instead of guessing.
                 lean_chat = force_agent is None and _is_casual_chat(store, session_id, req.message)
                 # Only pass tools when RAG is enabled (agent workflows need tools)
-                # For simple chat, don't pass tools to avoid issues with models lacking tool calling support
-                orchestrator_tools = {} if lean_chat else (tools if req.use_rag else {})
+                # For simple chat, keep web_search but skip file/shell tools.
+                orchestrator_tools = _chat_tools(lean_chat, tools, req.use_rag)
                 context = AgentContext(
                     session_id=session_id,
                     query=req.message,
@@ -208,7 +229,7 @@ def build_sessions_router(
         else:
             # Legacy path - only use tools if RAG is enabled (agent workflows need tools)
             # For simple chat, don't pass tools to avoid issues with models lacking tool calling support
-            chat_tools = tools if req.use_rag else {}
+            chat_tools = _chat_tools(lean_chat=not req.use_rag, tools=tools, use_rag=req.use_rag)
             reply = await run_agent_turn(
                 store,
                 session_id,
@@ -267,7 +288,7 @@ def build_sessions_router(
             store.add_turn(session_id, "user", message)
 
             # Only use tools if RAG is enabled (agent workflows need tools)
-            chat_tools = tools if use_rag else {}
+            chat_tools = _chat_tools(lean_chat=not use_rag, tools=tools, use_rag=use_rag)
             async for event in run_agent_turn_streaming(
                 store,
                 session_id,
@@ -339,11 +360,13 @@ def build_sessions_router(
                                     pass  # Invalid agent type, use auto-classification
 
                             from ..llm.agents import AgentContext
-                            # Lean chat profile: skip tools/RAG for casual
+                            # Lean chat profile: skip RAG for casual
                             # conversation (General agent handles these).
+                            # `web_search` stays available so facts can be
+                            # looked up instead of guessed.
                             lean_chat = force_agent is None and _is_casual_chat(store, session_id, message)
                             # Only pass tools when RAG is enabled
-                            orchestrator_tools = {} if lean_chat else (tools if use_rag else {})
+                            orchestrator_tools = _chat_tools(lean_chat, tools, use_rag)
                             context = AgentContext(
                                 session_id=session_id,
                                 query=message,
@@ -380,7 +403,7 @@ def build_sessions_router(
                     
                     # Legacy path
                     # Only use tools if RAG is enabled (agent workflows need tools)
-                    chat_tools = tools if use_rag else {}
+                    chat_tools = _chat_tools(lean_chat=not use_rag, tools=tools, use_rag=use_rag)
                     async for event in run_agent_turn_streaming(
                         store,
                         session_id,

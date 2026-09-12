@@ -18,6 +18,48 @@ from ...config import settings
 
 logger = logging.getLogger(__name__)
 
+DEAD_ROUND_REPLY = (
+    "I tried to verify that, but the search returned no usable results, "
+    "so I'd rather not guess. Could you rephrase the question?"
+)
+MAX_CONSECUTIVE_DEAD_ROUNDS = 2
+
+# Tools that touch the server's filesystem or shell. Remote chat clients
+# (use_rag=False, e.g. Discord) must never see these, so agents cannot get
+# prodded into file narration or attempts that end in "no such file" dead ends.
+FILE_TOOLS = {"read_file", "write_file", "list_dir", "run_bash"}
+
+
+def _file_tools_note(tools: dict) -> str:
+    """System-prompt guardrail for sessions without file/shell access.
+
+    Returns a note that tells the agent to analyze code already in the
+    conversation directly instead of attempting (or narrating) file access.
+    Empty string when at least one file/shell tool is available, so prompts
+    and existing tests are untouched on agentic (use_rag=True) sessions.
+    """
+    if any(k in tools for k in FILE_TOOLS):
+        return ""
+    return (
+        "\n\nNote: file and shell tools (read_file, write_file, list_dir, run_bash) "
+        "are not available in this session. If the code or file content you need is "
+        "already in the conversation, analyze it directly — do not attempt to read, "
+        "write, list, or execute files, and do not mention or ask for file access."
+    )
+
+
+def _is_dead_tool_result(result: str) -> bool:
+    low = (result or "").strip().lower()
+    return (
+        low.startswith("error:")
+        or low.startswith("error running ")
+        or "no results found" in low
+    )
+
+
+def _is_dead_round(results: list) -> bool:
+    return bool(results) and all(_is_dead_tool_result(r) for r in results)
+
 
 class AgentType(Enum):
     PLANNER = "planner"
@@ -108,11 +150,14 @@ class BaseAgent(ABC):
             use_reranker=context.use_reranker,
         )
 
+        # Guardrail for sessions without file/shell access (remote chat clients).
+        note = _file_tools_note(context.tools)
+
         # Prepend agent-specific system prompt
         if messages and messages[0].get("role") == "system":
-            messages[0]["content"] = f"{self.system_prompt}\n\n{messages[0]['content']}"
+            messages[0]["content"] = f"{self.system_prompt}{note}\n\n{messages[0]['content']}"
         else:
-            messages.insert(0, {"role": "system", "content": self.system_prompt})
+            messages.insert(0, {"role": "system", "content": f"{self.system_prompt}{note}"})
 
         # Hard safety net: the agent prompt was added on top of the store's
         # messages, so re-clamp the whole list against the session's real
@@ -137,6 +182,7 @@ class BaseAgent(ABC):
         """Run the tool-calling loop with budget awareness. Returns (final_reply, rounds_used, tool_calls_made)."""
         rounds_used = 0
         tool_calls_made = 0
+        dead_rounds = 0
 
         # Use context's budget limits if set, otherwise fall back to parameter
         effective_max_rounds = context.max_rounds if context.max_rounds > 0 else max_rounds
@@ -170,6 +216,10 @@ class BaseAgent(ABC):
             )
 
             tool_calls = message.get("tool_calls")
+            if tool_calls:
+                tool_calls = [
+                    {**tc, "type": (tc.get("type") or "function")} for tc in tool_calls
+                ]
             if not tool_calls:
                 reply = message.get("content") or ""
                 if message.get("finish_reason") == "length":
@@ -213,6 +263,22 @@ class BaseAgent(ABC):
                 else:
                     context.tokens_used += len(result) // 4
 
+            if _is_dead_round(results):
+                dead_rounds += 1
+            else:
+                dead_rounds = 0
+
+            if dead_rounds >= MAX_CONSECUTIVE_DEAD_ROUNDS:
+                logger.warning(
+                    f"Agent {self.agent_type.value}: stopping after {dead_rounds} "
+                    f"consecutive dead tool rounds (search unavailable)"
+                )
+                context.store.add_turn(context.session_id, "assistant", DEAD_ROUND_REPLY)
+                record_agent_turn(context.session_id, "assistant")
+                if hasattr(context.store, '_counter'):
+                    context.tokens_used += context.store._counter.count(DEAD_ROUND_REPLY)
+                return DEAD_ROUND_REPLY, rounds_used, tool_calls_made
+
             messages = context.store.build_messages(
                 context.session_id,
                 use_rag=False,
@@ -246,6 +312,7 @@ class BaseAgent(ABC):
         """
         rounds_used = 0
         tool_calls_made = 0
+        dead_rounds = 0
         effective_max_rounds = context.max_rounds if context.max_rounds > 0 else max_rounds
         effective_max_tool_calls = context.max_tool_calls if context.max_tool_calls > 0 else 20
 
@@ -294,7 +361,8 @@ class BaseAgent(ABC):
                     break
 
             tool_calls = [
-                tc for tc in tool_calls_buffer
+                {**tc, "type": (tc.get("type") or "function")}
+                for tc in tool_calls_buffer
                 if tc.get("id") and tc.get("function", {}).get("name")
             ]
 
@@ -346,6 +414,24 @@ class BaseAgent(ABC):
                     context.tokens_used += context.store._counter.count(result)
                 else:
                     context.tokens_used += len(result) // 4
+
+            if _is_dead_round(results):
+                dead_rounds += 1
+            else:
+                dead_rounds = 0
+
+            if dead_rounds >= MAX_CONSECUTIVE_DEAD_ROUNDS:
+                logger.warning(
+                    f"Agent {self.agent_type.value}: stopping after {dead_rounds} "
+                    f"consecutive dead tool rounds (search unavailable)"
+                )
+                context.store.add_turn(context.session_id, "assistant", DEAD_ROUND_REPLY)
+                record_agent_turn(context.session_id, "assistant")
+                if hasattr(context.store, '_counter'):
+                    context.tokens_used += context.store._counter.count(DEAD_ROUND_REPLY)
+                yield {"type": "content_delta", "content": DEAD_ROUND_REPLY}
+                yield {"type": "done", "reply": DEAD_ROUND_REPLY}
+                return
 
             messages = context.store.build_messages(context.session_id, use_rag=False)
             if hasattr(context.store, '_counter'):

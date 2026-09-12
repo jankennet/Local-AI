@@ -1,12 +1,22 @@
 """
 web_search.py
 
-DuckDuckGo web search for the agent tool loop. No API key required, uses
-the HTML endpoint (same approach as the Discord bot's MCP web scraper).
+DuckDuckGo web search for the agent tool loop. No API key required.
 
 Design:
   - Returns plain strings, never raises — tool errors are surfaced as
     text so the agent can react to them (matches tools.py convention).
+  - Primary backend: the HTML endpoint over httpx. DuckDuckGo sometimes
+    serves a 202 anti-bot challenge page (HTTP 200 body with "anomaly"
+    markers) to programmatic clients. When that happens we fall back to
+    curl-impersonate (`curl_chrome*`, a Chrome TLS-impersonating curl),
+    which presents a real Chrome fingerprint and passes the challenge —
+    no browser driver needed.
+  - A backend is treated as *blocked* (unavailable) when it returns a
+    non-200 status or a challenge page. Only a genuine 200 page that
+    parses zero results produces "no results found." If every backend is
+    blocked the tool returns a clear `Error:` string so the agent stops
+    searching instead of mistaking an infra outage for a missing fact.
   - Gated by LLM_WEB_SEARCH_ENABLED (default true). Disabled returns a
     clear error string, mirroring run_bash's LLM_ALLOW_SHELL posture.
   - In-process results cache with a TTL so retries don't hammer the
@@ -25,6 +35,19 @@ from ..config import settings
 logger = logging.getLogger(__name__)
 
 SEARCH_URL = "https://html.duckduckgo.com/html/"
+
+# curl-impersonate binaries ship as curl_chrome<major> / curl_firefox<major>.
+# Tried in order; the first one present and unblocked serves the request.
+_IMPERSONATE_BINS = [
+    "curl_chrome136",
+    "curl_chrome142",
+    "curl_chrome146",
+    "curl_chrome150",
+]
+_CURL_TIMEOUT_SECONDS = 15
+
+# substring markers the DDG anti-bot/anomaly challenge page contains.
+_CHALLENGE_MARKERS = ("anomaly", "challenge")
 
 # query (lowercased) + num_results -> (timestamp, result_text)
 _CACHE: Dict[Tuple[str, int], Tuple[float, str]] = {}
@@ -54,6 +77,19 @@ def _cache_put(key: Tuple[str, int], text: str) -> None:
     _CACHE[key] = (time.time(), text)
 
 
+def _looks_blocked(html: str) -> bool:
+    """True when the page is a DuckDuckGo anti-bot challenge, not results."""
+    low = html.lower()
+    return any(marker in low for marker in _CHALLENGE_MARKERS)
+
+
+def _count_results(html: str) -> int:
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(html, "html.parser")
+    return len(soup.select(".result"))
+
+
 def _parse_results(html: str, query: str, num_results: int) -> str:
     """Extract title/url/snippet from DuckDuckGo's HTML results page."""
     from bs4 import BeautifulSoup
@@ -81,6 +117,75 @@ def _parse_results(html: str, query: str, num_results: int) -> str:
     return "\n".join(output)
 
 
+async def _fetch_httpx(query: str, num_results: int) -> Optional[Tuple[str, int]]:
+    """Primary backend. Returns (text, parsed_count) or None when blocked."""
+    try:
+        params = httpx.QueryParams({"q": query})
+        timeout = settings.web_search_timeout
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            resp = await client.get(SEARCH_URL, params=params, headers={"User-Agent": _UA})
+            resp.raise_for_status()
+            html = resp.text
+    except httpx.TimeoutException:
+        logger.warning("web_search timeout for query=%r", query)
+        return None
+    except httpx.HTTPStatusError as e:
+        logger.warning("web_search HTTP error: %s", e)
+        return None
+    except httpx.HTTPError as e:
+        logger.warning("web_search request error: %s", e)
+        return None
+
+    if resp.status_code != 200:
+        logger.warning(
+            "web_search DDG html responded HTTP %d for query=%r (anti-bot block?)",
+            resp.status_code, query,
+        )
+        return None
+
+    count = _count_results(html)
+    if count == 0 and _looks_blocked(html):
+        logger.warning("web_search DDG html returned a challenge page for query=%r", query)
+        return None
+
+    return _parse_results(html, query, num_results), count
+
+
+async def _fetch_curl_impersonate(query: str, num_results: int) -> Optional[Tuple[str, int]]:
+    """Fallback backend: curl-impersonate with a real Chrome TLS fingerprint."""
+    for bin_name in _IMPERSONATE_BINS:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                bin_name,
+                "-s", "--location",
+                "--max-time", str(_CURL_TIMEOUT_SECONDS),
+                "--get", "--data-urlencode", f"q={query}",
+                "-A", _UA,
+                SEARCH_URL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            stdout, _ = await asyncio.wait_for(
+                proc.communicate(), timeout=_CURL_TIMEOUT_SECONDS + 5
+            )
+            html = stdout.decode("utf-8", errors="replace")
+        except Exception as e:  # missing binary, timeout, spawn error
+            logger.warning("web_search impersonate %s failed for query=%r: %s", bin_name, query, e)
+            continue
+
+        if not html:
+            continue
+        count = _count_results(html)
+        if count == 0 and _looks_blocked(html):
+            logger.warning("web_search impersonate %s got a challenge page for query=%r", bin_name, query)
+            continue
+
+        logger.info("web_search primary blocked; served by %s", bin_name)
+        return _parse_results(html, query, num_results), count
+
+    return None
+
+
 async def search_duckduckgo(query: str, num_results: int = 5) -> str:
     """Search the web and return top results as formatted text.
 
@@ -103,29 +208,20 @@ async def search_duckduckgo(query: str, num_results: int = 5) -> str:
         logger.info("web_search cache hit: query=%r num_results=%d", query, num_results)
         return cached
 
-    try:
-        params = httpx.QueryParams({"q": query})
-        timeout = settings.web_search_timeout
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-            resp = await client.get(SEARCH_URL, params=params, headers={"User-Agent": _UA})
-            resp.raise_for_status()
-            html = resp.text
-    except httpx.TimeoutException:
-        logger.warning("web_search timeout for query=%r", query)
-        return f"Error: web search timed out after {settings.web_search_timeout:.0f}s for '{query}'"
-    except httpx.HTTPStatusError as e:
-        logger.warning("web_search HTTP error: %s", e)
-        return f"Error: web search failed (HTTP {e.response.status_code})"
-    except httpx.HTTPError as e:
-        logger.warning("web_search request error: %s", e)
-        return f"Error: web search failed: {type(e).__name__}"
+    result = await _fetch_httpx(query, num_results)
+    backend = "duckduckgo-html"
+    if result is None:
+        result = await _fetch_curl_impersonate(query, num_results)
+        backend = "curl-impersonate"
 
-    try:
-        text = _parse_results(html, query, num_results)
-    except Exception as e:
-        logger.warning("web_search parse error: %s", e)
-        text = f"Error: failed to parse search results for '{query}'"
+    if result is None:
+        logger.warning(
+            "web_search unavailable for query=%r (all providers blocked/unreachable)", query
+        )
+        return ("Error: web search is temporarily unavailable "
+                "(all providers blocked or unreachable)")
 
+    text, count = result
     _cache_put(cache_key, text)
-    logger.info("web_search ok: query=%r results_returned=%d", query, num_results)
+    logger.info("web_search ok: query=%r backend=%r results_returned=%d", query, backend, count)
     return text
