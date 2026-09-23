@@ -89,8 +89,7 @@ class TestSessionsRouter:
             json={"device_name": "test-device"},
         )
         
-        # Header(...) makes it required, so 422 for missing header
-        assert response.status_code in (401, 422)
+        assert response.status_code == 401
 
     def test_list_sessions(self, client):
         # Create a session first
@@ -532,7 +531,7 @@ class TestProxyRouterEmbeddings:
         test_client, _ = client
         test_client.app.dependency_overrides.clear()
         response = test_client.post("/v1/embeddings", json={"input": "hello"})
-        assert response.status_code in (401, 422)
+        assert response.status_code == 401
 
     def test_no_embedding_service_returns_503(self, temp_dir):
         from fastapi import FastAPI

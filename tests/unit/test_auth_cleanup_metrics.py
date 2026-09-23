@@ -73,8 +73,56 @@ class TestAuth:
         client = TestClient(app)
 
         response = client.get("/test")
-        # Header(...) makes it required, so 422 for missing header
-        assert response.status_code in (401, 422)
+        # Header is now optional with no default key, so missing key -> 401
+        assert response.status_code == 401
+
+    def test_verify_api_key_bearer_valid(self, monkeypatch):
+        """OpenAI-compatible clients send Authorization: Bearer, not X-API-Key."""
+        verify = self._setup_auth(monkeypatch, "expected-key")
+
+        app = FastAPI()
+
+        @app.get("/test")
+        async def test_endpoint(api_key: str = Depends(verify)):
+            return {"validated": True}
+
+        client = TestClient(app)
+
+        response = client.get("/test", headers={"Authorization": "Bearer expected-key"})
+        assert response.status_code == 200
+        assert response.json()["validated"] is True
+
+    def test_verify_api_key_bearer_invalid(self, monkeypatch):
+        verify = self._setup_auth(monkeypatch, "expected-key")
+
+        app = FastAPI()
+
+        @app.get("/test")
+        async def test_endpoint(api_key: str = Depends(verify)):
+            return {"validated": True}
+
+        client = TestClient(app)
+
+        response = client.get("/test", headers={"Authorization": "Bearer wrong-key"})
+        assert response.status_code == 401
+
+    def test_verify_api_key_bearer_beats_bad_x_api_key(self, monkeypatch):
+        """Bearer token should be accepted even if a conflicting X-API-Key is sent."""
+        verify = self._setup_auth(monkeypatch, "expected-key")
+
+        app = FastAPI()
+
+        @app.get("/test")
+        async def test_endpoint(api_key: str = Depends(verify)):
+            return {"validated": True}
+
+        client = TestClient(app)
+
+        response = client.get(
+            "/test",
+            headers={"X-API-Key": "wrong-key", "Authorization": "Bearer expected-key"},
+        )
+        assert response.status_code == 200
 
 
 class TestCleanup:
